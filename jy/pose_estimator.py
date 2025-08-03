@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pose Estimation Module for RTMW-x
+Pose Estimation Module for RTMW-x (256x192 기준)
 RTMW-x WholeBody 포즈 추정기
 """
 
@@ -18,19 +18,11 @@ from config import (
 
 
 class RTMWXEstimator:
-    """RTMW-x WholeBody 포즈 추정기 (133 키포인트)
-    
-    RTMW-x는 Real-Time Multi-Person WholeBody Pose Estimation 모델로,
-    다음과 같은 키포인트를 검출합니다:
-    - Body: 17개 키포인트 (COCO 형식)
-    - Face: 68개 키포인트 
-    - Hands: 48개 키포인트 (양손 각각 21개 + 손목 6개)
-    총 133개 키포인트
-    """
+    """RTMW-x WholeBody 포즈 추정기 (133 키포인트, 256x192)"""
     
     def __init__(self, model_path: str, device: str = 'xpu:0'):
         self.device = device
-        self.input_size = RTMW_INPUT_SIZE
+        self.input_size = RTMW_INPUT_SIZE  # (256, 192)
         self.num_keypoints = RTMW_NUM_KEYPOINTS
         self.simcc_split_ratio = RTMW_SIMCC_SPLIT_RATIO
         
@@ -53,7 +45,6 @@ class RTMWXEstimator:
         # 체크포인트 로드
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         
-        # 체크포인트 구조 분석
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
             print("RTMW-x 체크포인트 구조 분석:")
@@ -72,20 +63,17 @@ class RTMWXEstimator:
                     print(f"  {key}: {state_dict[key].shape}")
                     
         else:
-            print("❌ state_dict를 찾을 수 없습니다.")
             raise RuntimeError("체크포인트에 state_dict가 없습니다.")
         
         # RTMW-x 모델 구조 생성
         model = RTMWXModel.create_from_checkpoint(state_dict)
         
-        # state_dict 로드
+        # state_dict 로드 (strict=False로 불일치 허용)
         try:
             missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
             print(f"✅ RTMW-x 모델 로드 완료")
-            if missing_keys:
-                print(f"⚠️ 누락된 키: {len(missing_keys)}개")
-            if unexpected_keys:
-                print(f"⚠️ 예상치 못한 키: {len(unexpected_keys)}개")
+            if len(missing_keys) > 0:
+                print(f"⚠️ 백본 단순화로 인한 누락된 키: {len(missing_keys)}개")
             
         except Exception as e:
             print(f"❌ RTMW-x 모델 로드 실패: {e}")
@@ -94,13 +82,13 @@ class RTMWXEstimator:
         return model
     
     def preprocess_image(self, image: np.ndarray, bbox: Tuple[int, int, int, int]) -> torch.Tensor:
-        """RTMW-x 입력을 위한 이미지 전처리"""
+        """RTMW-x 입력을 위한 이미지 전처리 (256x192)"""
         x1, y1, x2, y2 = bbox
         
         # 바운딩 박스 영역 크롭
         person_img = image[y1:y2, x1:x2]
         
-        # RTMW-x 표준 입력 크기로 리사이즈
+        # RTMW-x 표준 입력 크기로 리사이즈 (256x192)
         person_img = cv2.resize(person_img, self.input_size)
         
         # BGR -> RGB 변환
@@ -121,10 +109,12 @@ class RTMWXEstimator:
     
     def postprocess_keypoints(self, pred_x: torch.Tensor, pred_y: torch.Tensor, 
                             bbox: Tuple[int, int, int, int]) -> np.ndarray:
-        """RTMW-x SimCC 출력 후처리"""
+        """RTMW-x SimCC 출력 후처리 (384x288 기준)"""
         x1, y1, x2, y2 = bbox
         batch_size, num_keypoints, x_dim = pred_x.shape
         _, _, y_dim = pred_y.shape
+        
+        print(f"실제 bins: x_dim={x_dim}, y_dim={y_dim}")  # 디버깅용
         
         keypoints = []
         
@@ -133,28 +123,28 @@ class RTMWXEstimator:
             x_probs = torch.softmax(pred_x[0, i], dim=0)  
             y_probs = torch.softmax(pred_y[0, i], dim=0)  
             
-            # 좌표 인덱스 생성 (0 ~ bins-1)
+            # 좌표 인덱스 생성
             x_indices = torch.arange(x_dim, device=self.device, dtype=torch.float32)
             y_indices = torch.arange(y_dim, device=self.device, dtype=torch.float32)
             
-            # Expectation (확률 가중 평균)으로 좌표 계산
+            # Expectation으로 좌표 계산
             x_coord = torch.sum(x_probs * x_indices)  
             y_coord = torch.sum(y_probs * y_indices)  
             
-            # SimCC 좌표를 실제 픽셀 좌표로 변환
-            # RTMW-x는 simcc_split_ratio=2.0 사용
-            img_x = x_coord * (self.input_size[0] / x_dim) * self.simcc_split_ratio
-            img_y = y_coord * (self.input_size[1] / y_dim) * self.simcc_split_ratio
+            # bins을 실제 픽셀 좌표로 변환 (384x288 기준)
+            # 실제 384x288 모델의 경우 bins가 더 클 수 있음
+            pixel_x = (x_coord / (x_dim - 1)) * self.input_size[0]  # 384
+            pixel_y = (y_coord / (y_dim - 1)) * self.input_size[1]  # 288
             
             # 바운딩 박스 기준으로 원본 이미지 좌표로 변환
             bbox_width = x2 - x1
             bbox_height = y2 - y1
             
             # 정규화 후 바운딩 박스에 맞춤
-            norm_x = img_x / self.input_size[0]  # 0~2 범위
-            norm_y = img_y / self.input_size[1]  # 0~2 범위
+            norm_x = pixel_x / self.input_size[0]  # 0~1 범위
+            norm_y = pixel_y / self.input_size[1]  # 0~1 범위
             
-            # 좌표 클램핑 (0~1 범위로 제한)
+            # 좌표 클램핑
             norm_x = torch.clamp(norm_x, 0.0, 1.0)
             norm_y = torch.clamp(norm_y, 0.0, 1.0)
             
@@ -171,14 +161,5 @@ class RTMWXEstimator:
         
         with torch.no_grad():
             pred_x, pred_y = self.model(input_tensor)
-            
-            # 디버깅 정보 출력
-            print(f"모델 출력 크기: pred_x={pred_x.shape}, pred_y={pred_y.shape}")
-            
             keypoints = self.postprocess_keypoints(pred_x, pred_y, bbox)
-            
-            # 키포인트 분산 확인
-            kpt_std = np.std(keypoints, axis=0)
-            print(f"키포인트 분산: x_std={kpt_std[0]:.2f}, y_std={kpt_std[1]:.2f}")
-            
             return keypoints

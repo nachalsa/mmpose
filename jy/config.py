@@ -7,8 +7,8 @@ RTMW-x 설정 관리 모듈
 # 디바이스 설정
 DEFAULT_DEVICE = 'xpu:0'
 
-# 모델 설정
-RTMW_INPUT_SIZE = (384, 288)
+# 모델 설정 - 실제 384x288 사용
+RTMW_INPUT_SIZE = (384, 288)  # 384x288로 복원
 RTMW_NUM_KEYPOINTS = 133
 RTMW_SIMCC_SPLIT_RATIO = 2.0
 
@@ -20,7 +20,7 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 MODELS_DIR = "./models"
 YOLO_MODEL_FILENAME = "yolo11m.pt"
 
-# RTMW 모델 옵션
+# RTMW 모델 옵션 - 실제 384x288 모델들
 RTMW_MODEL_OPTIONS = [
     {
         "filename": "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
@@ -28,9 +28,14 @@ RTMW_MODEL_OPTIONS = [
         "description": "RTMW-x 384x288 (최고 성능)"
     },
     {
-        "filename": "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20d4d4ea_20231215.pth", 
-        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20d4d4ea_20231215.pth",
+        "filename": "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth",
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth",
         "description": "RTMW-l 384x288 (균형)"
+    },
+    {
+        "filename": "rtmpose-l_simcc-body7_pt-body7_420e-384x288-3f5a1437_20230504.pth",
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-l_simcc-body7_pt-body7_420e-384x288-3f5a1437_20230504.pth",
+        "description": "RTMPose-l 384x288 (Body7)"
     }
 ]
 
