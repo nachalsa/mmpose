@@ -263,7 +263,7 @@ class YOLO11LXPUHybridInferencer:
         return [bbox]
     
     def estimate_pose(self, image: np.ndarray, bbox: List[float]) -> Tuple[np.ndarray, np.ndarray]:
-        """RTMW를 사용한 포즈 추정 (XPU)"""
+        """RTMW를 사용한 포즈 추정 (XPU) - 원본 이미지 좌표계"""
         try:
             start_time = time.time()
             
@@ -293,6 +293,43 @@ class YOLO11LXPUHybridInferencer:
                 
         except Exception as e:
             print(f"❌ 포즈 추정 실패: {e}")
+            return np.zeros((133, 2)), np.zeros(133)
+    
+    def estimate_pose_on_crop(self, crop_image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """크롭된 이미지에서 직접 포즈 추정 - 크롭 이미지 좌표계"""
+        try:
+            start_time = time.time()
+            
+            # 크롭 이미지 전체를 바운딩박스로 사용
+            h, w = crop_image.shape[:2]
+            full_bbox = [0, 0, w, h]
+            
+            # MMPose 추론
+            results = inference_topdown(
+                model=self.pose_model,
+                img=crop_image,
+                bboxes=[full_bbox],
+                bbox_format='xyxy'
+            )
+            
+            pose_time = time.time() - start_time
+            self.inference_times['pose'].append(pose_time)
+            
+            if results and len(results) > 0:
+                keypoints = results[0].pred_instances.keypoints[0]
+                scores = results[0].pred_instances.keypoint_scores[0]
+                
+                if isinstance(keypoints, torch.Tensor):
+                    keypoints = keypoints.cpu().numpy()
+                if isinstance(scores, torch.Tensor):
+                    scores = scores.cpu().numpy()
+                    
+                return keypoints, scores
+            else:
+                return np.zeros((133, 2)), np.zeros(133)
+                
+        except Exception as e:
+            print(f"❌ 크롭 이미지 포즈 추정 실패: {e}")
             return np.zeros((133, 2)), np.zeros(133)
     
     def process_frame(self, image: np.ndarray, conf_thresh: float = None) -> Tuple[np.ndarray, List[Tuple[np.ndarray, np.ndarray, List[float]]]]:

@@ -20,6 +20,70 @@ from matplotlib.colors import ListedColormap
 
 from yolo11l_xpu_hybrid_inferencer import YOLO11LXPUHybridInferencer
 
+# RTMW 전처리 함수들 (MMPose에서 가져옴)
+def bbox_xyxy2cs(bbox: np.ndarray, padding: float = 1.25) -> Tuple[np.ndarray, np.ndarray]:
+    """바운딩박스를 center, scale로 변환"""
+    dim = bbox.ndim
+    if dim == 1:
+        bbox = bbox[None, :]
+    
+    scale = (bbox[..., 2:] - bbox[..., :2]) * padding
+    center = (bbox[..., 2:] + bbox[..., :2]) * 0.5
+    
+    if dim == 1:
+        center = center[0]
+        scale = scale[0]
+    
+    return center, scale
+
+def _rotate_point(pt: np.ndarray, angle_rad: float) -> np.ndarray:
+    """점을 회전"""
+    cos_val = np.cos(angle_rad)
+    sin_val = np.sin(angle_rad)
+    return np.array([pt[0] * cos_val - pt[1] * sin_val,
+                     pt[0] * sin_val + pt[1] * cos_val])
+
+def _get_3rd_point(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """세 번째 점을 계산 (직교점)"""
+    direction = a - b
+    return b + np.array([-direction[1], direction[0]])
+
+def get_warp_matrix(center: np.ndarray, scale: np.ndarray, rot: float, 
+                   output_size: Tuple[int, int]) -> np.ndarray:
+    """아핀 변환 매트릭스 계산"""
+    src_w, src_h = scale[:2]
+    dst_w, dst_h = output_size[:2]
+    
+    rot_rad = np.deg2rad(rot)
+    src_dir = _rotate_point(np.array([src_w * -0.5, 0.]), rot_rad)
+    dst_dir = np.array([dst_w * -0.5, 0.])
+    
+    src = np.zeros((3, 2), dtype=np.float32)
+    src[0, :] = center
+    src[1, :] = center + src_dir
+    
+    dst = np.zeros((3, 2), dtype=np.float32)
+    dst[0, :] = [dst_w * 0.5, dst_h * 0.5]
+    dst[1, :] = np.array([dst_w * 0.5, dst_h * 0.5]) + dst_dir
+    
+    # aspect ratio 고정
+    src[2, :] = _get_3rd_point(src[0, :], src[1, :])
+    dst[2, :] = _get_3rd_point(dst[0, :], dst[1, :])
+    
+    warp_mat = cv2.getAffineTransform(src, dst)
+    return warp_mat
+
+def fix_aspect_ratio(bbox_scale: np.ndarray, aspect_ratio: float) -> np.ndarray:
+    """bbox를 고정 종횡비로 조정"""
+    w, h = bbox_scale[0], bbox_scale[1]
+    if w > h * aspect_ratio:
+        new_h = w / aspect_ratio
+        bbox_scale = np.array([w, new_h])
+    else:
+        new_w = h * aspect_ratio
+        bbox_scale = np.array([new_w, h])
+    return bbox_scale
+
 class VideoProcessorYOLO11L:
     """YOLO11L 기반 영상 처리 및 크롭 저장 시스템"""
     
@@ -107,44 +171,55 @@ class VideoProcessorYOLO11L:
         return [new_x1, new_y1, new_x2, new_y2]
     
     def _crop_person_image(self, image: np.ndarray, bbox: List[float], person_id: int, frame_idx: int) -> np.ndarray:
-        """사람 이미지 크롭 (모델 입력 형태로)"""
-        # 확장된 바운딩박스
-        expanded_bbox = self._expand_bbox(bbox, image.shape)
-        x1, y1, x2, y2 = expanded_bbox
-        
-        # 크롭
-        cropped = image[y1:y2, x1:x2]
-        
-        if cropped.size == 0:
-            return None
-        
-        # 정사각형으로 패딩 (RTMW 입력에 적합)
-        h, w = cropped.shape[:2]
-        
-        if h != w:
-            # 더 긴 쪽에 맞춰 정사각형 만들기
-            target_size = max(h, w)
+        """사람 이미지 크롭 - RTMW 모델의 정확한 TopdownAffine 전처리 방식 사용"""
+        try:
+            # RTMW 설정: width=288, height=384
+            input_width, input_height = 288, 384
             
-            # 패딩 계산
-            pad_h = (target_size - h) // 2
-            pad_w = (target_size - w) // 2
+            # 1. bbox를 center, scale로 변환 (padding=1.25 적용)
+            bbox_array = np.array(bbox, dtype=np.float32)
+            center, scale = bbox_xyxy2cs(bbox_array, padding=1.25)
             
-            # 패딩 적용
-            padded = cv2.copyMakeBorder(
-                cropped,
-                pad_h, target_size - h - pad_h,
-                pad_w, target_size - w - pad_w,
-                cv2.BORDER_CONSTANT,
-                value=(114, 114, 114)  # YOLO 기본 패딩 색상
+            # 2. aspect ratio 고정 (width/height = 288/384 = 0.75)
+            aspect_ratio = input_width / input_height  # 0.75
+            scale = fix_aspect_ratio(scale, aspect_ratio)
+            
+            # 3. 아핀 변환 매트릭스 계산
+            warp_mat = get_warp_matrix(
+                center=center,
+                scale=scale,
+                rot=0.0,  # 회전 없음
+                output_size=(input_width, input_height)
             )
-            cropped = padded
-        
-        # RTMW 입력 크기로 리사이즈 (384x384)
-        target_size = 384
-        if cropped.shape[0] != target_size:
-            cropped = cv2.resize(cropped, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
-        
-        return cropped
+            
+            # 4. 아핀 변환 적용
+            cropped_image = cv2.warpAffine(
+                image, 
+                warp_mat, 
+                (input_width, input_height), 
+                flags=cv2.INTER_LINEAR
+            )
+            
+            # 5. 크기 검증
+            h, w = cropped_image.shape[:2]
+            if h == input_height and w == input_width:
+                return cropped_image
+            else:
+                print(f"⚠️ 크기 오류: {h}x{w}, 예상: {input_height}x{input_width}")
+                return cropped_image
+                
+        except Exception as e:
+            print(f"⚠️ RTMW 전처리 실패 (Person {person_id}): {e}")
+            # 폴백: 단순 크롭 + 리사이즈
+            expanded_bbox = self._expand_bbox(bbox, image.shape)
+            x1, y1, x2, y2 = expanded_bbox
+            cropped = image[y1:y2, x1:x2]
+            
+            if cropped.size == 0:
+                return None
+            
+            # 288x384 (WxH)로 리사이즈
+            return cv2.resize(cropped, (288, 384), interpolation=cv2.INTER_LINEAR)
     
     def _save_crop_image(self, crop_image: np.ndarray, frame_idx: int, person_id: int, bbox: List[float], confidence: float = None) -> str:
         """크롭 이미지 저장"""
@@ -247,21 +322,18 @@ class VideoProcessorYOLO11L:
     def _save_combined_data(self, frame_idx: int, person_id: int, crop_image: np.ndarray, 
                            keypoints: np.ndarray, scores: np.ndarray, bbox: List[float], 
                            original_image_shape: Tuple[int, int] = None) -> str:
-        """이미지와 포즈 데이터를 결합한 파일 저장"""
+        """이미지와 포즈 데이터를 결합한 파일 저장 - RTMW 정확한 전처리 기반"""
         try:
-            # 크롭 변환 정보 계산
-            expanded_bbox = self._expand_bbox(bbox, original_image_shape if original_image_shape else (720, 1280))
-            x1, y1, x2, y2 = expanded_bbox
-            crop_w = x2 - x1
-            crop_h = y2 - y1
+            # RTMW 입력 크기: width=288, height=384
+            input_width, input_height = 288, 384
             
-            # 정사각형 패딩 정보
-            max_size = max(crop_w, crop_h)
-            pad_w = (max_size - crop_w) // 2
-            pad_h = (max_size - crop_h) // 2
+            # bbox를 center, scale로 변환 (RTMW와 동일한 방식)
+            bbox_array = np.array(bbox, dtype=np.float32)
+            center, scale = bbox_xyxy2cs(bbox_array, padding=1.25)
             
-            # 최종 384x384로 리사이즈 비율
-            resize_ratio = 384.0 / max_size if max_size > 0 else 1.0
+            # aspect ratio 고정
+            aspect_ratio = input_width / input_height  # 0.75
+            scale = fix_aspect_ratio(scale, aspect_ratio)
             
             # 결합 데이터 구성
             combined_data = {
@@ -272,15 +344,16 @@ class VideoProcessorYOLO11L:
                     'bbox': bbox
                 },
                 'crop_transform': {
-                    'expanded_bbox': expanded_bbox,
-                    'crop_size': [crop_w, crop_h],
-                    'padding': [pad_w, pad_h],
-                    'resize_ratio': resize_ratio,
-                    'final_size': [384, 384]
+                    'bbox_center': center.tolist(),
+                    'bbox_scale': scale.tolist(),
+                    'input_size': [input_width, input_height],  # [288, 384]
+                    'aspect_ratio': aspect_ratio,
+                    'padding_factor': 1.25
                 },
                 'pose_data': {
-                    'keypoints': keypoints.tolist(),
-                    'scores': scores.tolist(),
+                    # keypoints는 크롭 이미지 좌표계에서의 x,y,score만 저장
+                    'keypoints_2d': [[float(kpt[0]), float(kpt[1]), float(score)] 
+                                   for kpt, score in zip(keypoints, scores)],
                     'stats': {
                         'total_keypoints': len(keypoints),
                         'valid_keypoints': int(np.sum(scores > 0.3)),
@@ -291,9 +364,8 @@ class VideoProcessorYOLO11L:
                     }
                 },
                 'image_info': {
-                    'original_shape': crop_image.shape,
+                    'shape': list(crop_image.shape),  # [height, width, channels]
                     'dtype': str(crop_image.dtype),
-                    'channels': crop_image.shape[2] if len(crop_image.shape) > 2 else 1,
                     'size_bytes': crop_image.nbytes
                 }
             }
@@ -301,19 +373,23 @@ class VideoProcessorYOLO11L:
             # 파일명 생성
             base_filename = f"frame_{frame_idx:06d}_person_{person_id}_combined"
             
-            # JSON 저장
+            # JSON 저장 (메타데이터)
             json_path = self.output_dir / "combined_data" / f"{base_filename}.json"
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(combined_data, f, indent=2, ensure_ascii=False)
             
-            # 이미지 저장 (넘파이 배열)
+            # 크롭 이미지 저장 (RTMW 전처리된 이미지)
             npy_path = self.output_dir / "combined_data" / f"{base_filename}_image.npy"
             np.save(npy_path, crop_image)
             
-            # 포즈 데이터만 따로 넘파이 배열로 저장
+            # 포즈 데이터 저장 (x, y, score)
             pose_npy_path = self.output_dir / "combined_data" / f"{base_filename}_pose.npy"
             pose_array = np.column_stack([keypoints, scores.reshape(-1, 1)])  # (133, 3) - [x, y, score]
             np.save(pose_npy_path, pose_array)
+            
+            # 시각화용 JPEG 저장
+            vis_path = self.output_dir / "combined_data" / f"{base_filename}_visualization.jpg"
+            self._save_pose_visualization(crop_image, keypoints, scores, vis_path)
             
             # 통합 크롭 이미지도 JPEG로 저장
             crop_img_path = self.output_dir / "combined_data" / f"{base_filename}_crop.jpg"
@@ -354,6 +430,20 @@ class VideoProcessorYOLO11L:
         transformed_keypoints[:, 1] = transformed_keypoints[:, 1] * resize_ratio
         
         return transformed_keypoints
+    
+    def _process_person_with_crop_pose(self, image: np.ndarray, bbox: List[float], person_id: int, frame_idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """크롭된 이미지에서 포즈 추정을 수행하여 일관된 좌표계 사용"""
+        # 1. 크롭 이미지 생성
+        crop_image = self._crop_person_image(image, bbox, person_id, frame_idx)
+        if crop_image is None:
+            return None, None, None
+        
+        # 2. 크롭된 이미지에서 직접 포즈 추정
+        keypoints, scores = self.inferencer.estimate_pose_on_crop(crop_image)
+        
+        print(f"🎯 크롭 이미지 포즈 추정: Person {person_id}, 유효 키포인트: {np.sum(scores > 0.3)}/133")
+        
+        return crop_image, keypoints, scores
     
     def load_combined_data(self, combined_json_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
         """결합 데이터 로드"""
@@ -453,7 +543,7 @@ class VideoProcessorYOLO11L:
         return dataset
     
     def visualize_combined_data(self, combined_json_path: str, save_path: str = None, show_confidence: bool = True) -> str:
-        """결합 데이터를 시각화 (이미지 + 포즈 오버레이)"""
+        """결합 데이터를 시각화 (이미지 + 포즈 오버레이) - 크롭 좌표계 직접 사용"""
         try:
             # 결합 데이터 로드
             crop_image, keypoints, scores, metadata = self.load_combined_data(combined_json_path)
@@ -462,14 +552,12 @@ class VideoProcessorYOLO11L:
                 print(f"❌ 결합 데이터 로드 실패: {combined_json_path}")
                 return None
             
-            # 키포인트 좌표를 크롭 이미지 좌표계로 변환
+            # 크롭 좌표계 정보 확인
             crop_transform = metadata.get('crop_transform', None)
             if crop_transform:
-                transformed_keypoints = self._transform_keypoints_to_crop_coords(keypoints, crop_transform)
-                print(f"🔄 키포인트 좌표 변환 적용: 원본 -> 크롭 좌표계")
+                print(f"🎯 크롭 좌표계 데이터 사용 (변환 불필요)")
             else:
-                transformed_keypoints = keypoints
-                print(f"⚠️ 크롭 변환 정보 없음, 원본 좌표 사용")
+                print(f"⚠️ 크롭 변환 정보 없음 - 레거시 데이터일 수 있음")
             
             # 시각화 생성
             fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -478,21 +566,21 @@ class VideoProcessorYOLO11L:
             # 1. 원본 크롭 이미지
             ax1 = axes[0, 0]
             ax1.imshow(cv2.cvtColor(crop_image, cv2.COLOR_BGR2RGB))
-            ax1.set_title('Original Crop Image (384x384)')
+            ax1.set_title('Original Crop Image (288x384 - HxW)')
             ax1.axis('off')
             
-            # 2. 포즈 키포인트 오버레이 (변환된 좌표 사용)
+            # 2. 포즈 키포인트 오버레이 (크롭 좌표계 직접 사용)
             ax2 = axes[0, 1]
             ax2.imshow(cv2.cvtColor(crop_image, cv2.COLOR_BGR2RGB))
             
-            # 키포인트 그리기 (신뢰도별 색상) - 변환된 좌표 사용
+            # 키포인트 그리기 (크롭 좌표계 직접 사용)
             valid_count = 0
-            for i, (kpt, score) in enumerate(zip(transformed_keypoints, scores)):
+            for i, (kpt, score) in enumerate(zip(keypoints, scores)):
                 if score > 0.3:  # 유효한 키포인트만
                     x, y = kpt[0], kpt[1]
                     
-                    # 이미지 범위 내에 있는지 확인
-                    if 0 <= x <= 384 and 0 <= y <= 384:
+                    # 이미지 범위 내에 있는지 확인 (288x384)
+                    if 0 <= x <= 384 and 0 <= y <= 288:
                         valid_count += 1
                         
                         # 신뢰도에 따른 색상 및 크기
@@ -515,21 +603,21 @@ class VideoProcessorYOLO11L:
                                        color='white', weight='bold',
                                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.7))
             
-            ax2.set_title(f'Pose Keypoints Overlay\n(Valid: {valid_count}/133, Transformed coords)')
+            ax2.set_title(f'Pose Keypoints Overlay\n(Valid: {valid_count}/133, RTMW coords)')
             ax2.axis('off')
             
-            # 3. 신뢰도 히트맵 (변환된 좌표 사용)
+            # 3. 신뢰도 히트맵 (크롭 좌표계 직접 사용)
             ax3 = axes[1, 0]
             
-            # 키포인트를 이미지 위에 히트맵으로 표시
-            heatmap = np.zeros((384, 384))
-            for kpt, score in zip(transformed_keypoints, scores):
+            # 키포인트를 이미지 위에 히트맵으로 표시 (288x384)
+            heatmap = np.zeros((288, 384))
+            for kpt, score in zip(keypoints, scores):
                 if score > 0.3:
                     x, y = int(kpt[0]), int(kpt[1])
-                    if 0 <= x < 384 and 0 <= y < 384:
+                    if 0 <= x < 384 and 0 <= y < 288:
                         # 가우시안 블러로 히트맵 생성
-                        size = int(score * 20)
-                        y_start, y_end = max(0, y-size), min(384, y+size)
+                        size = int(score * 15)  # 더 작은 히트맵 사이즈
+                        y_start, y_end = max(0, y-size), min(288, y+size)
                         x_start, x_end = max(0, x-size), min(384, x+size)
                         heatmap[y_start:y_end, x_start:x_end] = np.maximum(
                             heatmap[y_start:y_end, x_start:x_end], score
@@ -537,7 +625,7 @@ class VideoProcessorYOLO11L:
             
             im3 = ax3.imshow(heatmap, cmap='jet', alpha=0.7, vmin=0, vmax=1)
             ax3.imshow(cv2.cvtColor(crop_image, cv2.COLOR_BGR2RGB), alpha=0.3)
-            ax3.set_title('Confidence Heatmap (Transformed coords)')
+            ax3.set_title('Confidence Heatmap (Crop coords)')
             ax3.axis('off')
             plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
             
@@ -548,7 +636,6 @@ class VideoProcessorYOLO11L:
             # 통계 텍스트 생성
             stats = metadata["pose_data"]["stats"]
             bbox = metadata["frame_info"]["bbox"]
-            crop_info = metadata.get("crop_transform", {})
             
             stats_text = f"""
 📊 Pose Statistics:
@@ -560,14 +647,16 @@ class VideoProcessorYOLO11L:
 • Min Confidence: {stats['min_confidence']:.3f}
 
 📷 Image Info:
-• Crop Size: {crop_image.shape[1]}x{crop_image.shape[0]}
+• Crop Size: {crop_image.shape[1]}x{crop_image.shape[0]} (WxH)
+• RTMW Format: 384x288 (WxH)
 • Channels: {crop_image.shape[2]}
 • Data Type: {crop_image.dtype}
 
-� Crop Transform:
-• Expanded BBox: {crop_info.get('expanded_bbox', 'N/A')}
-• Padding: {crop_info.get('padding', 'N/A')}
-• Resize Ratio: {crop_info.get('resize_ratio', 'N/A'):.3f}
+🎯 Coordinate System:
+• Type: RTMW Model Coordinates
+• X Range: 0-384 pixels
+• Y Range: 0-288 pixels
+• Note: Direct model input coords
 
 �📐 Original Bounding Box:
 • X: {bbox[0]:.1f} ~ {bbox[2]:.1f}
@@ -797,21 +886,22 @@ class VideoProcessorYOLO11L:
                 
                 # 결과 저장
                 if results:
-                    for person_id, (keypoints, scores, bbox) in enumerate(results):
-                        # 크롭 이미지 저장
-                        crop_image = None
-                        if self.save_crops:
-                            crop_image = self._crop_person_image(frame, bbox, person_id, frame_idx)
-                            if crop_image is not None:
+                    for person_id, (original_keypoints, original_scores, bbox) in enumerate(results):
+                        # 크롭 이미지에서 포즈 추정 수행 (일관된 좌표계)
+                        crop_image, crop_keypoints, crop_scores = self._process_person_with_crop_pose(frame, bbox, person_id, frame_idx)
+                        
+                        if crop_image is not None:
+                            # 크롭 이미지 저장
+                            if self.save_crops:
                                 crop_path = self._save_crop_image(crop_image, frame_idx, person_id, bbox)
-                        
-                        # 포즈 데이터 저장
-                        if self.save_pose_data:
-                            pose_path = self._save_pose_data(frame_idx, person_id, keypoints, scores, bbox)
-                        
-                        # 결합 데이터 저장 (크롭과 포즈 모두 있을 때)
-                        if crop_image is not None and self.save_pose_data:
-                            combined_path = self._save_combined_data(frame_idx, person_id, crop_image, keypoints, scores, bbox, frame.shape)
+                            
+                            # 포즈 데이터 저장 (크롭 좌표계)
+                            if self.save_pose_data:
+                                pose_path = self._save_pose_data(frame_idx, person_id, crop_keypoints, crop_scores, bbox)
+                            
+                            # 결합 데이터 저장 (크롭과 포즈 모두 크롭 좌표계)
+                            if self.save_pose_data:
+                                combined_path = self._save_combined_data(frame_idx, person_id, crop_image, crop_keypoints, crop_scores, bbox, frame.shape)
                 
                 # 처리된 프레임 저장
                 processed_frame_path = self.output_dir / "processed_frames" / f"frame_{frame_idx:06d}_processed.jpg"
@@ -953,21 +1043,22 @@ class VideoProcessorYOLO11L:
                     save_this_frame = (frame_count % save_interval == 0) or results
                     
                     if save_this_frame and results:
-                        for person_id, (keypoints, scores, bbox) in enumerate(results):
-                            # 크롭 저장
-                            crop_image = None
-                            if self.save_crops:
-                                crop_image = self._crop_person_image(frame, bbox, person_id, frame_count)
-                                if crop_image is not None:
+                        for person_id, (original_keypoints, original_scores, bbox) in enumerate(results):
+                            # 크롭 이미지에서 포즈 추정 수행 (일관된 좌표계)
+                            crop_image, crop_keypoints, crop_scores = self._process_person_with_crop_pose(frame, bbox, person_id, frame_count)
+                            
+                            if crop_image is not None:
+                                # 크롭 저장
+                                if self.save_crops:
                                     self._save_crop_image(crop_image, frame_count, person_id, bbox)
-                            
-                            # 포즈 데이터 저장
-                            if self.save_pose_data:
-                                self._save_pose_data(frame_count, person_id, keypoints, scores, bbox)
-                            
-                            # 결합 데이터 저장
-                            if crop_image is not None and self.save_pose_data:
-                                self._save_combined_data(frame_count, person_id, crop_image, keypoints, scores, bbox, frame.shape)
+                                
+                                # 포즈 데이터 저장 (크롭 좌표계)
+                                if self.save_pose_data:
+                                    self._save_pose_data(frame_count, person_id, crop_keypoints, crop_scores, bbox)
+                                
+                                # 결합 데이터 저장
+                                if self.save_pose_data:
+                                    self._save_combined_data(frame_count, person_id, crop_image, crop_keypoints, crop_scores, bbox, frame.shape)
                     
                     # 정보 표시
                     remaining_time = duration_seconds - elapsed_time
@@ -993,25 +1084,26 @@ class VideoProcessorYOLO11L:
                     print(f"⏸️ {'일시정지' if paused else '재생'}")
                 elif key == ord('s') or key == ord('S'):  # 즉시 저장
                     if results:
-                        for person_id, (keypoints, scores, bbox) in enumerate(results):
-                            crop_image = None
-                            if self.save_crops:
-                                crop_image = self._crop_person_image(frame, bbox, person_id, frame_count)
-                                if crop_image is not None:
+                        for person_id, (original_keypoints, original_scores, bbox) in enumerate(results):
+                            # 크롭 이미지에서 포즈 추정 수행 (일관된 좌표계)
+                            crop_image, crop_keypoints, crop_scores = self._process_person_with_crop_pose(frame, bbox, person_id, frame_count)
+                            
+                            if crop_image is not None:
+                                if self.save_crops:
                                     path = self._save_crop_image(crop_image, frame_count, person_id, bbox)
                                     print(f"📸 즉시 저장: {os.path.basename(path)}")
-                            
-                            # 포즈 데이터 즉시 저장
-                            if self.save_pose_data:
-                                pose_path = self._save_pose_data(frame_count, person_id, keypoints, scores, bbox)
-                                if pose_path:
-                                    print(f"📊 포즈 데이터 저장: {os.path.basename(pose_path)}")
-                            
-                            # 결합 데이터 즉시 저장
-                            if crop_image is not None and self.save_pose_data:
-                                combined_path = self._save_combined_data(frame_count, person_id, crop_image, keypoints, scores, bbox, frame.shape)
-                                if combined_path:
-                                    print(f"🔗 결합 데이터 저장: {os.path.basename(combined_path)}")
+                                
+                                # 포즈 데이터 즉시 저장 (크롭 좌표계)
+                                if self.save_pose_data:
+                                    pose_path = self._save_pose_data(frame_count, person_id, crop_keypoints, crop_scores, bbox)
+                                    if pose_path:
+                                        print(f"📊 포즈 데이터 저장: {os.path.basename(pose_path)}")
+                                
+                                # 결합 데이터 즉시 저장
+                                if self.save_pose_data:
+                                    combined_path = self._save_combined_data(frame_count, person_id, crop_image, crop_keypoints, crop_scores, bbox, frame.shape)
+                                    if combined_path:
+                                        print(f"🔗 결합 데이터 저장: {os.path.basename(combined_path)}")
         
         except KeyboardInterrupt:
             print("\n⏹️ 사용자가 녹화를 중단했습니다.")
@@ -1126,14 +1218,16 @@ def main():
                 vis_frame, results = processor.inferencer.process_frame(image)
                 
                 if results:
-                    for person_id, (keypoints, scores, bbox) in enumerate(results):
-                        crop_image = processor._crop_person_image(image, bbox, person_id, 0)
+                    for person_id, (original_keypoints, original_scores, bbox) in enumerate(results):
+                        # 크롭 이미지에서 포즈 추정 수행 (일관된 좌표계)
+                        crop_image, crop_keypoints, crop_scores = processor._process_person_with_crop_pose(image, bbox, person_id, 0)
+                        
                         if crop_image is not None:
                             crop_path = processor._save_crop_image(crop_image, 0, person_id, bbox)
                             print(f"✅ 크롭 저장: {crop_path}")
                             
-                            # 결합 데이터도 저장
-                            combined_path = processor._save_combined_data(0, person_id, crop_image, keypoints, scores, bbox, image.shape)
+                            # 결합 데이터도 저장 (크롭 좌표계)
+                            combined_path = processor._save_combined_data(0, person_id, crop_image, crop_keypoints, crop_scores, bbox, image.shape)
                             if combined_path:
                                 print(f"🔗 결합 데이터 저장: {combined_path}")
                             
@@ -1242,7 +1336,7 @@ def main():
 
 📁 저장 파일 구조 (각 사람마다 4개 파일):
   1. frame_XXXXXX_person_X_combined.json       - 메타데이터 및 통계
-  2. frame_XXXXXX_person_X_combined_image.npy  - 크롭 이미지 (384x384 넘파이)
+  2. frame_XXXXXX_person_X_combined_image.npy  - 크롭 이미지 (288x384 넘파이)
   3. frame_XXXXXX_person_X_combined_pose.npy   - 포즈 데이터 (133x3: x,y,score)
   4. frame_XXXXXX_person_X_combined_crop.jpg   - 시각화용 JPEG 이미지
 
@@ -1267,7 +1361,7 @@ def main():
       }
     },
     "image_info": {
-      "original_shape": [384, 384, 3],
+      "original_shape": [288, 384, 3],
       "dtype": "uint8",
       "channels": 3,
       "size_bytes": 이미지 바이트 크기
@@ -1276,9 +1370,9 @@ def main():
 
 🔄 데이터 처리 과정:
   1. YOLO11L로 사람 검출 → 바운딩박스 생성
-  2. 바운딩박스 15% 패딩 확장 → 정사각형으로 변환
-  3. 384x384로 리사이즈 (RTMW 입력 크기에 맞춤)
-  4. RTMW로 133개 키포인트 추정
+  2. 바운딩박스 15% 패딩 확장 → RTMW 비율(3:4)로 변환
+  3. 288x384로 리사이즈 (RTMW 정확한 입력 크기)
+  4. RTMW로 크롭 이미지에서 직접 133개 키포인트 추정
   5. 이미지 + 포즈 + 메타데이터 결합 저장
 
 💡 활용 방법:
