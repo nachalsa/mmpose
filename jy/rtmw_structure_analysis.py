@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MMPose 공식 RTMW 결과 구조 분석 및 올바른 추론
+MMPose 공식 RTMW 결과 구조 분석 및 올바른 추론 (XPU 지원)
 """
 
 import os
@@ -9,10 +9,33 @@ import cv2
 import numpy as np
 from mmpose.apis import MMPoseInferencer, init_model
 import json
+import time
+
+def check_xpu_availability():
+    """XPU 가용성 확인"""
+    try:
+        if torch.xpu.is_available():
+            device_count = torch.xpu.device_count()
+            print(f"✅ Intel XPU 사용 가능: {device_count}개 디바이스")
+            return True
+        else:
+            print("⚠️ Intel XPU 사용 불가 - CPU 모드로 실행")
+            return False
+    except Exception as e:
+        print(f"⚠️ XPU 확인 실패: {e} - CPU 모드로 실행")
+        return False
 
 def analyze_result_structure():
     """결과 구조 분석"""
-    print("=== MMPose 결과 구조 분석 ===\n")
+    print("=== MMPose 결과 구조 분석 (XPU 지원) ===\n")
+    
+    # XPU 가용성 확인 및 디바이스 선택
+    xpu_available = check_xpu_availability()
+    # XPU가 있어도 MMDetection NMS 이슈로 CPU 사용
+    device = 'cpu'  # 'xpu' if xpu_available else 'cpu'
+    if xpu_available:
+        print(f"⚠️ XPU 사용 가능하지만 MMDetection NMS 호환성 문제로 CPU 사용")
+    print(f"🔧 사용 디바이스: {device}")
     
     checkpoint_path = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
     config_path = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
@@ -23,19 +46,26 @@ def analyze_result_structure():
     torch.load = lambda *args, **kwargs: original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else original_load(*args, **kwargs)
     
     try:
-        print("🔧 MMPoseInferencer 초기화")
+        print(f"🔧 MMPoseInferencer 초기화 (디바이스: {device})")
+        start_time = time.time()
+        
         inferencer = MMPoseInferencer(
             pose2d=config_path,
             pose2d_weights=checkpoint_path,
-            device='cpu'
+            device=device
         )
+        
+        init_time = time.time() - start_time
+        print(f"✅ 모델 로딩 완료: {init_time:.2f}초")
         
         # 추론 실행
         print("🔧 추론 실행")
+        inference_start = time.time()
         results_gen = inferencer(test_image, show=False, return_vis=False)
         results = list(results_gen)
+        inference_time = time.time() - inference_start
         
-        print(f"✅ 결과 개수: {len(results)}")
+        print(f"✅ 결과 개수: {len(results)} (추론 시간: {inference_time:.2f}초)")
         
         if len(results) > 0:
             result = results[0]
@@ -99,9 +129,17 @@ def analyze_result_structure():
         torch.load = original_load
 
 def correct_inference_test():
-    """올바른 추론 테스트"""
+    """올바른 추론 테스트 (XPU 지원)"""
     print("\n" + "="*50)
-    print("=== 올바른 RTMW 추론 테스트 ===\n")
+    print("=== 올바른 RTMW 추론 테스트 (XPU 지원) ===\n")
+    
+    # XPU 가용성 확인 및 디바이스 선택
+    xpu_available = check_xpu_availability()
+    # XPU가 있어도 MMDetection NMS 이슈로 CPU 사용
+    device = 'cpu'  # 'xpu' if xpu_available else 'cpu'
+    if xpu_available:
+        print(f"⚠️ XPU 사용 가능하지만 MMDetection NMS 호환성 문제로 CPU 사용")
+    print(f"🔧 사용 디바이스: {device}")
     
     checkpoint_path = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
     config_path = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
@@ -112,19 +150,26 @@ def correct_inference_test():
     torch.load = lambda *args, **kwargs: original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else original_load(*args, **kwargs)
     
     try:
-        print("🔧 MMPoseInferencer 초기화")
+        print(f"🔧 MMPoseInferencer 초기화 (디바이스: {device})")
+        start_time = time.time()
+        
         inferencer = MMPoseInferencer(
             pose2d=config_path,
             pose2d_weights=checkpoint_path,
-            device='cpu'
+            device=device
         )
+        
+        init_time = time.time() - start_time
+        print(f"✅ 모델 로딩 완료: {init_time:.2f}초")
         
         # 추론 실행
         print("🔧 추론 실행")
+        inference_start = time.time()
         results_gen = inferencer(test_image, show=False, return_vis=False)
         results = list(results_gen)
+        inference_time = time.time() - inference_start
         
-        print(f"✅ 추론 완료: {len(results)} 개 이미지")
+        print(f"✅ 추론 완료: {len(results)} 개 이미지 (추론 시간: {inference_time:.2f}초)")
         
         if len(results) > 0:
             result = results[0]
@@ -204,10 +249,22 @@ def correct_inference_test():
                 print("  ❌ 예측 결과를 찾을 수 없음")
                 
         print("\n🎨 시각화 결과 저장")
+        vis_start = time.time()
         vis_results = inferencer(test_image, show=False, return_vis=True, out_dir='rtmw_official_output')
         vis_list = list(vis_results)
+        vis_time = time.time() - vis_start
+        
         if vis_list:
-            print("✅ 시각화 저장 완료: rtmw_official_output/")
+            print(f"✅ 시각화 저장 완료: rtmw_official_output/ (시각화 시간: {vis_time:.2f}초)")
+            
+        # 성능 요약
+        total_time = init_time + inference_time + vis_time
+        print(f"\n📊 성능 요약 (디바이스: {device}):")
+        print(f"   - 모델 로딩: {init_time:.2f}초")
+        print(f"   - 추론 시간: {inference_time:.2f}초") 
+        print(f"   - 시각화: {vis_time:.2f}초")
+        print(f"   - 총 시간: {total_time:.2f}초")
+        print(f"   - 추론 FPS: {1/inference_time:.1f}")
         
     except Exception as e:
         print(f"❌ 추론 실패: {e}")
@@ -216,6 +273,94 @@ def correct_inference_test():
     finally:
         torch.load = original_load
 
+
+def benchmark_performance():
+    """성능 벤치마크 테스트"""
+    print("\n" + "="*50)
+    print("=== RTMW 성능 벤치마크 ===\n")
+    
+    # XPU 가용성 확인 및 디바이스 선택
+    xpu_available = check_xpu_availability()
+    # XPU가 있어도 MMDetection NMS 이슈로 CPU 사용
+    device = 'cpu'  # 'xpu' if xpu_available else 'cpu'
+    if xpu_available:
+        print(f"⚠️ XPU 사용 가능하지만 MMDetection NMS 호환성 문제로 CPU 사용")
+    print(f"🔧 사용 디바이스: {device}")
+    
+    checkpoint_path = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
+    config_path = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
+    test_image = "winter01.jpg"
+    
+    # PyTorch 보안 설정
+    original_load = torch.load
+    torch.load = lambda *args, **kwargs: original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else original_load(*args, **kwargs)
+    
+    try:
+        print(f"🔧 MMPoseInferencer 초기화 (디바이스: {device})")
+        inferencer = MMPoseInferencer(
+            pose2d=config_path,
+            pose2d_weights=checkpoint_path,
+            device=device
+        )
+        print("✅ 모델 로딩 완료")
+        
+        # 워밍업
+        print("🔥 워밍업 중...")
+        for _ in range(3):
+            _ = list(inferencer(test_image, show=False, return_vis=False))
+            
+        # 벤치마크
+        num_iterations = 10
+        print(f"📊 벤치마크 시작 ({num_iterations}회 반복)...")
+        
+        times = []
+        for i in range(num_iterations):
+            start_time = time.time()
+            _ = list(inferencer(test_image, show=False, return_vis=False))
+            end_time = time.time()
+            
+            iteration_time = end_time - start_time
+            times.append(iteration_time)
+            print(f"  반복 {i+1}/{num_iterations}: {iteration_time*1000:.2f}ms")
+            
+        # 결과 분석
+        avg_time = np.mean(times)
+        min_time = np.min(times)
+        max_time = np.max(times)
+        std_time = np.std(times)
+        
+        print(f"\n📊 벤치마크 결과 (디바이스: {device}):")
+        print(f"   - 평균 시간: {avg_time*1000:.2f}ms (±{std_time*1000:.2f}ms)")
+        print(f"   - 최소 시간: {min_time*1000:.2f}ms")
+        print(f"   - 최대 시간: {max_time*1000:.2f}ms")
+        print(f"   - 평균 FPS: {1/avg_time:.1f}")
+        print(f"   - XPU 사용: {'✅' if device == 'xpu' else '❌'}")
+        
+    except Exception as e:
+        print(f"❌ 벤치마크 실패: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        torch.load = original_load
+
+
 if __name__ == "__main__":
-    analyze_result_structure()
-    correct_inference_test()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='RTMW 구조 분석 및 성능 테스트')
+    parser.add_argument('--benchmark', action='store_true', 
+                       help='성능 벤치마크 실행')
+    parser.add_argument('--analysis', action='store_true', 
+                       help='결과 구조 분석 실행')
+    
+    args = parser.parse_args()
+    
+    if args.benchmark:
+        benchmark_performance()
+    elif args.analysis:
+        analyze_result_structure()
+    else:
+        # 기본: 모두 실행
+        analyze_result_structure()
+        correct_inference_test()
+        benchmark_performance()
