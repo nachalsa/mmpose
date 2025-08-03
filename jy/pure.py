@@ -12,46 +12,37 @@ from typing import List, Tuple, Optional
 import urllib.request
 import os
 
+# SimplePersonDetector 클래스 수정
 class SimplePersonDetector:
-    """간단한 YOLOv5 기반 인체 검출기"""
+    """YOLOv11 Person 전용 검출기 (최신 SOTA)"""
     
     def __init__(self, device='xpu:0'):
         self.device = device
-        # YOLOv5s 모델 로드 (COCO 데이터셋 훈련)
-        self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-        self.model.to(device)
-        self.model.eval()
+        try:
+            from ultralytics import YOLO
+            # YOLOv11 모델 로드 (가장 최신)
+            self.model = YOLO('yolo11m.pt')  # 또는 yolo11x.pt (더 정확)
+            self.model.to(device)
+            print("✅ YOLOv11 모델 로드 완료")
+        except ImportError:
+            print("❌ ultralytics 패키지가 필요합니다: pip install ultralytics")
+            raise
         
-    def detect_persons(self, image: np.ndarray, conf_thresh: float = 0.5) -> List[Tuple[int, int, int, int]]:
-        """
-        이미지에서 사람 바운딩 박스 검출
-        
-        Args:
-            image: BGR 이미지 (OpenCV 형식)
-            conf_thresh: 신뢰도 임계값
-            
-        Returns:
-            List of (x1, y1, x2, y2) bounding boxes
-        """
-        # BGR -> RGB 변환
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # 추론
-        with torch.no_grad():
-            results = self.model(rgb_image)
-        
-        # 결과 파싱 (class 0 = person)
-        detections = results.pandas().xyxy[0]
-        person_boxes = detections[
-            (detections['class'] == 0) & 
-            (detections['confidence'] > conf_thresh)
-        ]
+    def detect_persons(self, image: np.ndarray, conf_thresh: float = 0.5):
+        """YOLOv11으로 사람 검출"""
+        # 추론 (Person 클래스만, conf 임계값 적용)
+        results = self.model(image, classes=[0], conf=conf_thresh, verbose=False)
         
         boxes = []
-        for _, row in person_boxes.iterrows():
-            x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
-            boxes.append((x1, y1, x2, y2))
-            
+        if len(results[0].boxes) > 0:
+            for box in results[0].boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = box.conf[0].cpu().numpy()
+                
+                # 신뢰도가 임계값보다 높은 경우만 추가
+                if conf > conf_thresh:
+                    boxes.append((int(x1), int(y1), int(x2), int(y2)))
+        
         return boxes
 
 class RTMWXEstimator:
@@ -75,9 +66,9 @@ class RTMWXEstimator:
         """모델 로드 (PyTorch 체크포인트)"""
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"모델 파일을 찾을 수 없습니다: {model_path}")
-            
-        # 체크포인트 로드
-        checkpoint = torch.load(model_path, map_location='cpu')
+        
+        # 체크포인트 로드 (weights_only=False 추가)
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         
         # 모델 구조는 실제 RTMW-x 구조로 대체해야 함
         # 여기서는 간단한 예시 구조 사용
@@ -88,7 +79,7 @@ class RTMWXEstimator:
             model.load_state_dict(checkpoint['state_dict'])
         else:
             model.load_state_dict(checkpoint)
-            
+        
         return model
     
     def _create_rtmw_model(self):
@@ -231,14 +222,21 @@ def main():
     print(f"✅ 사용 디바이스: {device}")
     print(f"XPU 디바이스: {torch.xpu.get_device_name(0)}")
     
-    # 모델 경로 설정 (실제 RTMW-x 모델 경로로 변경)
-    model_path = "/path/to/rtmw-x_model.pth"  # 실제 모델 경로
+    # 모델 경로 설정
+    models_dir = "./models"
+    model_filename = "rtmpose-x_simcc-coco-wholebody_pt-body7_270e-384x288-401dfc90_20230629.pth"
+    model_path = os.path.join(models_dir, model_filename)
     model_url = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-x_simcc-coco-wholebody_pt-body7_270e-384x288-401dfc90_20230629.pth"
+    
+    # models 디렉토리 생성
+    os.makedirs(models_dir, exist_ok=True)
     
     # 모델 다운로드 (필요시)
     if not os.path.exists(model_path):
-        print("실제 RTMW-x 모델 파일을 지정해주세요.")
-        return
+        print(f"모델이 없습니다. 다운로드 중: {model_url}")
+        download_model(model_url, model_path)
+    else:
+        print(f"✅ 모델 발견: {model_path}")
     
     try:
         # 검출기 및 포즈 추정기 초기화
