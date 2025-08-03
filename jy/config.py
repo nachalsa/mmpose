@@ -19,9 +19,13 @@ RTMW_INPUT_SIZE = (384, 288)  # Height=384, Width=288
 RTMW_NUM_KEYPOINTS = 133
 RTMW_SIMCC_SPLIT_RATIO = 2.0  # X/Y 공통 split ratio
 
-# ImageNet 정규화 파라미터
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
+# 정규화 설정 - MMPose 공식 방식
+POSE_MEAN = [123.675, 116.28, 103.53]   # MMPose PoseDataPreprocessor 표준 (RGB, 0-255)
+POSE_STD = [58.395, 57.12, 57.375]      # MMPose PoseDataPreprocessor 표준 (RGB, 0-255)
+
+# 기존 ImageNet 정규화 (참고용, 더 이상 사용하지 않음)
+IMAGENET_MEAN = [0.485, 0.456, 0.406]   # 0-1 스케일
+IMAGENET_STD = [0.229, 0.224, 0.225]    # 0-1 스케일
 
 # =============================================================================
 # 통합 모델 관리 - 모든 모델을 models 디렉토리에서 관리

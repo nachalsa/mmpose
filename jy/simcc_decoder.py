@@ -74,13 +74,17 @@ class RTMWSimCCDecoder:
         x_scores = torch.max(simcc_x_prob, dim=-1)[0]  # [B, K]
         y_scores = torch.max(simcc_y_prob, dim=-1)[0]  # [B, K]
         
-        # 인덱스를 실제 좌표로 변환
-        # SimCC에서 좌표 = (인덱스 + 0.5) / split_ratio
-        x_coords = (x_indices.float() + 0.5) / self.simcc_split_ratio  # [B, K]
-        y_coords = (y_indices.float() + 0.5) / self.simcc_split_ratio  # [B, K]
+        # 인덱스를 실제 좌표로 변환 (MMPose 공식 방식)
+        # MMPose: 인덱스를 float로 변환 후 마지막에 simcc_split_ratio로 나누기
+        x_coords = x_indices.float()  # [B, K]
+        y_coords = y_indices.float()  # [B, K]
         
-        # 전체 신뢰도 계산 (X, Y 신뢰도의 기하평균)
-        joint_scores = torch.sqrt(x_scores * y_scores)  # [B, K]
+        # MMPose 공식: 최종적으로 simcc_split_ratio로 나누기
+        x_coords = x_coords / self.simcc_split_ratio  # [B, K]
+        y_coords = y_coords / self.simcc_split_ratio  # [B, K]
+        
+        # 전체 신뢰도 계산 (MMPose 공식: min 방식)
+        joint_scores = torch.minimum(x_scores, y_scores)  # [B, K]
         
         # 최종 키포인트 좌표 구성 [B, K, 3]
         keypoints = torch.stack([x_coords, y_coords, joint_scores], dim=-1)

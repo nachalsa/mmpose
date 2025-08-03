@@ -12,8 +12,11 @@ import numpy as np
 from typing import Tuple, List, Optional, Dict, Any
 import os
 
-from config import RTMW_INPUT_SIZE, IMAGENET_MEAN, IMAGENET_STD
+from config import RTMW_INPUT_SIZE, POSE_MEAN, POSE_STD
 from simcc_decoder import RTMWSimCCDecoder
+
+# MMPose 공식 함수들 import
+from mmpose.structures.bbox import bbox_xyxy2cs, get_warp_matrix
 
 
 class RTMWXEstimator:
@@ -315,29 +318,67 @@ class RTMWXEstimator:
             return np.zeros((133, 2), dtype=np.float32)
     
     def _preprocess_image(self, image: np.ndarray, bbox: List[float]) -> torch.Tensor:
-        """이미지 전처리"""
+        """MMPose 공식 방식의 이미지 전처리"""
+        # 1. bbox를 center, scale로 변환 (MMPose 방식)
         x1, y1, x2, y2 = bbox
+        center, scale = self._bbox_to_center_scale(bbox)
         
-        # 바운딩박스 크롭
-        cropped = image[int(y1):int(y2), int(x1):int(x2)]
+        # 2. MMPose TopdownAffine 변환 적용
+        transformed_img = self._apply_topdown_affine(image, center, scale)
         
-        # 리사이즈
-        resized = cv2.resize(cropped, self.input_size)  # (384, 288)
+        # 3. MMPose PoseDataPreprocessor 방식 정규화
+        normalized_img = self._apply_pose_data_preprocessor(transformed_img)
         
-        # RGB 변환 및 정규화
-        rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        normalized = rgb_image.astype(np.float32) / 255.0
-        
-        # ImageNet 정규화
-        mean = np.array(IMAGENET_MEAN, dtype=np.float32)
-        std = np.array(IMAGENET_STD, dtype=np.float32)
-        normalized = (normalized - mean) / std
-        
-        # Torch 텐서 변환: [H, W, 3] -> [1, 3, H, W]
-        tensor = torch.from_numpy(normalized.transpose(2, 0, 1)).unsqueeze(0)
+        # 4. Torch 텐서 변환: [H, W, 3] -> [1, 3, H, W]
+        tensor = torch.from_numpy(normalized_img.transpose(2, 0, 1)).unsqueeze(0)
         tensor = tensor.to(self.device)
         
         return tensor
+    
+    def _bbox_to_center_scale(self, bbox: List[float]) -> Tuple[np.ndarray, np.ndarray]:
+        """바운딩박스를 MMPose center, scale 형식으로 변환 (공식 방식 사용)"""
+        bbox_array = np.array(bbox, dtype=np.float32)  # [x1, y1, x2, y2]
+        
+        # MMPose 공식 bbox_xyxy2cs 함수 사용 (padding=1.25 기본값)
+        center, scale = bbox_xyxy2cs(bbox_array, padding=1.25)
+        
+        return center, scale
+    
+    def _apply_topdown_affine(self, image: np.ndarray, center: np.ndarray, scale: np.ndarray) -> np.ndarray:
+        """MMPose TopdownAffine 변환 적용 (공식 구현 사용)"""
+        # 입력 크기 (W, H) = (288, 384)
+        w, h = self.input_size
+        
+        # MMPose 공식 get_warp_matrix 함수 사용
+        warp_mat = get_warp_matrix(
+            center=center,
+            scale=scale, 
+            rot=0,  # 회전 없음
+            output_size=(w, h)
+        )
+        
+        # Affine 변환 적용
+        transformed = cv2.warpAffine(
+            image, warp_mat, (w, h), flags=cv2.INTER_LINEAR)
+        
+        return transformed
+    
+    def _apply_pose_data_preprocessor(self, image: np.ndarray) -> np.ndarray:
+        """MMPose PoseDataPreprocessor 방식 정규화"""
+        # BGR -> RGB 변환
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # float32 변환 (0-255 범위 유지)
+        img_float = rgb_image.astype(np.float32)
+        
+        # MMPose 공식 정규화 값 (RGB 순서, 0-255 스케일)
+        mean = np.array([123.675, 116.28, 103.53], dtype=np.float32)
+        std = np.array([58.395, 57.12, 57.375], dtype=np.float32)
+        
+        # 정규화 적용
+        normalized = (img_float - mean) / std
+        
+        return normalized
     
     def _run_pytorch_inference(self, input_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """PyTorch 모델 추론"""
@@ -389,27 +430,36 @@ class RTMWXEstimator:
     
     def _transform_coordinates(self, keypoints: np.ndarray, bbox: List[float], 
                              original_image_shape: Tuple[int, int]) -> np.ndarray:
-        """키포인트 좌표를 원본 이미지 좌표계로 변환"""
-        x1, y1, x2, y2 = bbox
-        crop_width = x2 - x1
-        crop_height = y2 - y1
+        """키포인트 좌표를 원본 이미지 좌표계로 변환 (MMPose 공식 방식)"""
+        if keypoints.size == 0:
+            return keypoints
+            
+        # MMPose 공식 방식으로 center, scale 계산
+        center, scale = self._bbox_to_center_scale(bbox)
         
-        # 모델 입력 크기에서 크롭 크기로 스케일링
-        # input_size = (H, W) = (384, 288)
-        scale_x = crop_width / self.input_width    # 288
-        scale_y = crop_height / self.input_height  # 384
+        # 입력 크기
+        w, h = self.input_size
         
-        # 좌표 변환
-        transformed = keypoints.copy()
-        transformed[:, 0] = keypoints[:, 0] * scale_x + x1  # X 좌표
-        transformed[:, 1] = keypoints[:, 1] * scale_y + y1  # Y 좌표
+        # MMPose 공식 역변환 매트릭스 계산
+        warp_mat = get_warp_matrix(
+            center=center,
+            scale=scale,
+            rot=0,
+            output_size=(w, h),
+            inv=True  # 역변환
+        )
+        
+        # 키포인트 좌표 변환
+        # keypoints shape: (133, 2)
+        keypoints_homogeneous = np.hstack([keypoints, np.ones((keypoints.shape[0], 1))])
+        transformed_keypoints = keypoints_homogeneous @ warp_mat.T
         
         # 이미지 경계 클리핑
-        h, w = original_image_shape[:2]
-        transformed[:, 0] = np.clip(transformed[:, 0], 0, w-1)
-        transformed[:, 1] = np.clip(transformed[:, 1], 0, h-1)
+        h_orig, w_orig = original_image_shape[:2]
+        transformed_keypoints[:, 0] = np.clip(transformed_keypoints[:, 0], 0, w_orig-1)
+        transformed_keypoints[:, 1] = np.clip(transformed_keypoints[:, 1], 0, h_orig-1)
         
-        return transformed
+        return transformed_keypoints
     
     def get_model_info(self) -> Dict[str, Any]:
         """모델 정보 반환"""
