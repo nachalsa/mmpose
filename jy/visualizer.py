@@ -19,6 +19,16 @@ class RTMWVisualizer:
         self.hands_color = (255, 0, 0)   # 파란색 - Hands (48개)
         self.bbox_color = (0, 255, 255)  # 노란색 - 바운딩 박스
         
+        # 키포인트별 색상 리스트 (133개)
+        self.keypoint_colors = (
+            # Body keypoints (17개) - 빨강 계열
+            [(255, 0, 0), (255, 50, 50), (255, 100, 100)] * 6 +
+            # Face keypoints (68개) - 초록 계열  
+            [(0, 255, 0), (50, 255, 50), (100, 255, 100)] * 23 +
+            # Hand keypoints (48개) - 파랑 계열
+            [(0, 0, 255), (50, 50, 255), (100, 100, 255)] * 16
+        )
+        
         # 키포인트 크기
         self.body_radius = 3
         self.face_radius = 2  
@@ -95,6 +105,10 @@ class RTMWVisualizer:
         
         return frame
     
+    def _draw_skeleton(self, frame: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
+        """Body 스켈레톤 연결선 그리기 (내부 메서드)"""
+        return self.draw_skeleton(frame, keypoints)
+    
     def draw_bbox(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], 
                   person_id: int = 0, label: str = None) -> np.ndarray:
         """바운딩 박스 그리기
@@ -160,29 +174,39 @@ class RTMWVisualizer:
         
         return frame
     
-    def visualize_pose(self, frame: np.ndarray, keypoints: np.ndarray, 
-                      bbox: Tuple[int, int, int, int], person_id: int = 0,
-                      draw_skeleton: bool = True) -> np.ndarray:
-        """전체 포즈 시각화 (키포인트 + 스켈레톤 + 바운딩박스)
+    def visualize_pose(self, image: np.ndarray, keypoints: np.ndarray, 
+                      bbox: List[float], person_id: int = 0) -> np.ndarray:
+        """포즈 시각화"""
+        if keypoints is None or len(keypoints) == 0:
+            return image
         
-        Args:
-            frame: 입력 이미지
-            keypoints: 키포인트 좌표 (133, 2)
-            bbox: 바운딩 박스 (x1, y1, x2, y2)
-            person_id: 사람 ID
-            draw_skeleton: 스켈레톤 연결선 그리기 여부
+        result_image = image.copy()
+        
+        # 키포인트 형태 확인 및 수정
+        if keypoints.shape != (133, 2):
+            print(f"⚠️ 예상치 못한 키포인트 형태: {keypoints.shape}")
+            if keypoints.shape[1] == 3:  # (x, y, score) 형태인 경우
+                keypoints = keypoints[:, :2]  # x, y만 사용
+            elif keypoints.shape[0] != 133:
+                print(f"❌ 잘못된 키포인트 수: {keypoints.shape[0]}")
+                return result_image
+        
+        # 바운딩박스 그리기
+        try:
+            x1, y1, x2, y2 = map(int, bbox[:4])  # 처음 4개 값만 사용
+            cv2.rectangle(result_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
             
-        Returns:
-            전체 포즈가 시각화된 이미지
-        """
-        # 1. 바운딩 박스 그리기
-        frame = self.draw_bbox(frame, bbox, person_id)
+            # 사람 ID 표시
+            label = f"Person {person_id + 1}"
+            cv2.putText(result_image, label, (x1, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        except Exception as e:
+            print(f"⚠️ 바운딩박스 그리기 실패: {e}, bbox: {bbox}")
         
-        # 2. 키포인트 그리기
-        frame = self.draw_keypoints(frame, keypoints, person_id)
+        # 키포인트 그리기 (구분된 색상 사용)
+        result_image = self.draw_keypoints(result_image, keypoints, person_id)
         
-        # 3. 스켈레톤 연결선 그리기 (옵션)
-        if draw_skeleton:
-            frame = self.draw_skeleton(frame, keypoints)
+        # 스켈레톤 그리기 (Body keypoints만)
+        result_image = self.draw_skeleton(result_image, keypoints)
         
-        return frame
+        return result_image
