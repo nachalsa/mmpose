@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Copyright (c) OpenMMLab. All rights reserved.
 """
-RTMPose-x 384x288 Intel XPU 웹캠 데모
+RTMPose-x WholeBody 133점 Intel XPU 웹캠 데모
 
 빠른 시작:
-    python demo/simple_webcam_demo.py --device xpu:0
+    python demo/simple_webcam_demo.py --device cpu
 
 요구사항:
     - OpenCV
@@ -20,6 +20,11 @@ import argparse
 import sys
 import os
 
+# Qt 플랫폼 설정 (GUI 문제 해결)
+os.environ['QT_QPA_PLATFORM'] = 'xcb'  # X11 사용 강제
+# 또는 headless 환경이면
+# os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
 # Intel XPU 지원 먼저 import
 try:
     import torch
@@ -33,7 +38,6 @@ except Exception as e:
     print(f"Intel XPU 초기화 실패: {e}")
 
 # MMPose 경로 추가
-# sys.path.insert(0, '/home/ty/rtmw/02')
 sys.path.insert(0, '/home/ty/rtmw/02/mmpose')
 
 # pycocotools를 xtcocotools로 alias (MMPose 호환성)
@@ -50,7 +54,7 @@ try:
 except ImportError:
     print("pycocotools import 실패")
 
-# 간단한 Inferencer 대신 직접 모델 로딩
+# MMPose와 시각화 모듈 import
 try:
     from mmpose.apis.inferencers import MMPoseInferencer
     MMPOSE_AVAILABLE = True
@@ -58,19 +62,122 @@ except ImportError as e:
     print(f"MMPose Inferencer import 실패: {e}")
     MMPOSE_AVAILABLE = False
 
+# 시각화 모듈 import
+try:
+    from pose_visualizer import (
+        PoseVisualizer, 
+        create_fps_counter, 
+        update_fps_counter,
+        handle_mmpose_visualization
+    )
+    VISUALIZER_AVAILABLE = True
+except ImportError as e:
+    print(f"시각화 모듈 import 실패: {e}")
+    VISUALIZER_AVAILABLE = False
+
+
+def test_opencv_display():
+    """OpenCV 디스플레이 테스트"""
+    print("🔍 OpenCV 디스플레이 테스트 중...")
+    try:
+        # 간단한 테스트 이미지 생성
+        test_img = cv2.imread('/dev/null')  # 존재하지 않는 파일
+        if test_img is None:
+            import numpy as np
+            test_img = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(test_img, "OpenCV Test", (200, 240), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+        
+        cv2.imshow('OpenCV Test', test_img)
+        print("✅ OpenCV 창 생성 성공! 3초 후 자동 닫힘...")
+        cv2.waitKey(3000)  # 3초 대기
+        cv2.destroyAllWindows()
+        return True
+    except Exception as e:
+        print(f"❌ OpenCV 디스플레이 테스트 실패: {e}")
+        return False
+
+
+def test_webcam():
+    """웹캠 접근 테스트"""
+    print("📹 웹캠 접근 테스트 중...")
+    try:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("❌ 웹캠 열기 실패")
+            return False
+        
+        ret, frame = cap.read()
+        if not ret:
+            print("❌ 웹캠에서 프레임 읽기 실패")
+            cap.release()
+            return False
+        
+        print(f"✅ 웹캠 성공! 프레임 크기: {frame.shape}")
+        cap.release()
+        return True
+    except Exception as e:
+        print(f"❌ 웹캠 테스트 실패: {e}")
+        return False
+
 
 def main():
-    parser = argparse.ArgumentParser(description='RTMPose-x Intel XPU Webcam Demo')
+    parser = argparse.ArgumentParser(description='RTMPose-x WholeBody Intel XPU Webcam Demo')
     parser.add_argument('--camera', type=int, default=0, help='Camera ID')
-    parser.add_argument('--device', type=str, default='xpu:0', help='Device (xpu:0, cuda:0 or cpu)')
-    parser.add_argument('--config', type=str, 
+    parser.add_argument('--device', type=str, default='cpu', help='Device (xpu:0, cuda:0 or cpu)')
+    
+    # 모델 설정 - WholeBody가 기본값
+    parser.add_argument('--wholebody', action='store_true', default=True, 
+                       help='WholeBody 133점 모드 사용 (기본값)')
+    parser.add_argument('--body-only', action='store_true', 
+                       help='Body 17점 모드만 사용 (WholeBody 비활성화)')
+    
+    # 테스트 옵션 추가
+    parser.add_argument('--test-only', action='store_true', 
+                       help='시스템 테스트만 수행 (추론 없음)')
+    parser.add_argument('--save-frames', action='store_true', 
+                       help='프레임을 파일로 저장 (GUI 없음)')
+    parser.add_argument('--verbose', action='store_true', 
+                       help='상세 디버그 출력')
+    
+    # Body 17점 모델 설정
+    parser.add_argument('--body-config', type=str, 
                        default='/home/ty/rtmw/02/mmpose/configs/body_2d_keypoint/rtmpose/body8/rtmpose-x_8xb256-700e_body8-halpe26-384x288.py',
-                       help='Config file path')
-    parser.add_argument('--checkpoint', type=str,
+                       help='Body config file path')
+    parser.add_argument('--body-checkpoint', type=str,
                        default='https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-x_simcc-body7_pt-body7-halpe26_700e-384x288-7fb6e239_20230606.pth',
-                       help='Checkpoint file path')
+                       help='Body checkpoint file path')
+    
+    # WholeBody 모델 설정 (기본값)
+    parser.add_argument('--wholebody-config', type=str,
+                       default='/home/ty/rtmw/02/mmpose/configs/wholebody_2d_keypoint/rtmpose/coco-wholebody/rtmpose-l_8xb32-270e_coco-wholebody-384x288.py',
+                       help='WholeBody config file path')
+    parser.add_argument('--wholebody-checkpoint', type=str,
+                       default='https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-l_simcc-coco-wholebody_pt-aic-coco_270e-384x288-eaeb96c8_20230125.pth',
+                       help='WholeBody checkpoint file path')
+    
     parser.add_argument('--force-xpu', action='store_true', help='XPU 강제 사용 (NMS 오류 무시)')
+    parser.add_argument('--kpt-thr', type=float, default=0.3, help='키포인트 임계값')
+    parser.add_argument('--radius', type=int, default=4, help='키포인트 반지름')
+    parser.add_argument('--thickness', type=int, default=2, help='스켈레톤 두께')
+    parser.add_argument('--show-labels', action='store_true', help='키포인트 번호 표시')
     args = parser.parse_args()
+
+    # 테스트 모드
+    if args.test_only:
+        print("🔧 시스템 테스트 모드")
+        opencv_ok = test_opencv_display()
+        webcam_ok = test_webcam()
+        
+        if opencv_ok and webcam_ok:
+            print("✅ 모든 테스트 통과!")
+        else:
+            print("❌ 일부 테스트 실패")
+        return
+
+    # --body-only 옵션이 있으면 wholebody 비활성화
+    if args.body_only:
+        args.wholebody = False
 
     # 디바이스 정보 출력
     print(f"요청된 디바이스: {args.device}")
@@ -92,11 +199,36 @@ def main():
     if not MMPOSE_AVAILABLE:
         print("오류: MMPose를 import할 수 없습니다.")
         return
+        
+    if not VISUALIZER_AVAILABLE:
+        print("오류: 시각화 모듈을 import할 수 없습니다.")
+        return
 
     print(f"최종 사용 디바이스: {args.device}")
 
-    # RTMPose-x 모델 초기화 (여러 detection 모델 시도)
-    print("RTMPose-x 모델 로딩 중...")
+    # 모델 설정 선택 (기본값은 WholeBody)
+    if args.wholebody:
+        config = args.wholebody_config
+        checkpoint = args.wholebody_checkpoint
+        mode_text = "WholeBody 133점"
+        print("📍 WholeBody 133점 모드 사용 (기본값)")
+    else:
+        config = args.body_config
+        checkpoint = args.body_checkpoint
+        mode_text = "Body 17점"
+        print("📍 Body 17점 모드 사용")
+
+    # 시각화 객체 초기화
+    visualizer = PoseVisualizer(
+        keypoint_threshold=args.kpt_thr,
+        keypoint_radius=args.radius,
+        skeleton_thickness=args.thickness,
+        show_keypoint_labels=args.show_labels,
+        wholebody_mode=args.wholebody  # 기본값 True
+    )
+
+    # RTMPose 모델 초기화
+    print("RTMPose 모델 로딩 중...")
     detection_models = [
         'yolox_s_8x8_300e_coco',  # YOLOX-S
         'yolox_tiny_8x8_300e_coco',  # YOLOX-Tiny
@@ -110,16 +242,16 @@ def main():
         try:
             print(f"Detection 모델 시도: {det_model}")
             inferencer = MMPoseInferencer(
-                pose2d=args.config,
-                pose2d_weights=args.checkpoint,
+                pose2d=config,
+                pose2d_weights=checkpoint,
                 det_model=det_model,
                 device=args.device,
                 show_progress=False
             )
-            print(f"모델 로딩 완료! (Detection: {det_model})")
+            print(f"✅ 모델 로딩 완료! (Detection: {det_model})")
             break
         except Exception as e:
-            print(f"Detection 모델 {det_model} 실패: {e}")
+            print(f"❌ Detection 모델 {det_model} 실패: {e}")
             continue
     
     if inferencer is None:
@@ -127,219 +259,172 @@ def main():
         try:
             # Detection 없이 전체 이미지에서 포즈 추정
             inferencer = MMPoseInferencer(
-                pose2d=args.config,
-                pose2d_weights=args.checkpoint,
+                pose2d=config,
+                pose2d_weights=checkpoint,
                 device=args.device,
                 show_progress=False
             )
-            print("Detection 없는 모델 로딩 완료!")
+            print("✅ Detection 없는 모델 로딩 완료!")
         except Exception as e:
-            print(f"모델 로딩 완전 실패: {e}")
+            print(f"❌ 모델 로딩 완전 실패: {e}")
             return
 
     # 웹캠 초기화
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
-        print(f"웹캠 {args.camera}를 열 수 없습니다.")
+        print(f"❌ 웹캠 {args.camera}를 열 수 없습니다.")
         return
 
-    print(f"\n=== RTMPose-x 웹캠 데모 ===")
-    print(f"디바이스: {args.device}")
-    if XPU_AVAILABLE and args.device.startswith('xpu'):
-        print(f"XPU 디바이스: {torch.xpu.get_device_name(0)}")
-    elif XPU_AVAILABLE:
-        print(f"XPU 사용 가능: {torch.xpu.get_device_name(0)} (현재 CPU 사용 중)")
-    print("'q' 키를 눌러 종료하세요.")
-    print("===================================\n")
+    # 웹캠 설정
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
-    fps_counter = 0
-    start_time = time.time()
+    print(f"\n{'='*50}")
+    print(f"🎥 RTMPose {mode_text} 웹캠 데모")
+    print(f"{'='*50}")
+    print(f"🖥️  디바이스: {args.device}")
+    if XPU_AVAILABLE and args.device.startswith('xpu'):
+        print(f"🔥 XPU 디바이스: {torch.xpu.get_device_name(0)}")
+    elif XPU_AVAILABLE:
+        print(f"💡 XPU 사용 가능: {torch.xpu.get_device_name(0)} (현재 CPU 사용 중)")
+    print(f"👤 모드: {mode_text}")
+    if args.wholebody:
+        print("🎨 WholeBody 색상 구분:")
+        print("   - 초록색: Body (17점)")
+        print("   - 마젠타: Face (68점)")
+        print("   - 시안색: Left Hand (21점)")
+        print("   - 노란색: Right Hand (21점)")
+        print("   - 주황색: Left Foot (6점)")
+        print("   - 보라색: Right Foot (6점)")
+    
+    if args.save_frames:
+        print("💾 프레임 저장 모드 활성화")
+    else:
+        print("⌨️  'q' 키를 눌러 종료하세요.")
+    print(f"{'='*50}\n")
+
+    # FPS 카운터 초기화
+    fps_counter = create_fps_counter()
     error_count = 0
+    frame_count = 0
 
     try:
+        print("🚀 실시간 추론 시작...")
+        
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("웹캠에서 프레임을 읽을 수 없습니다.")
+                print("❌ 웹캠에서 프레임을 읽을 수 없습니다.")
                 break
+
+            frame_count += 1
+            if args.verbose and frame_count % 30 == 0:
+                print(f"📊 처리된 프레임: {frame_count}")
 
             # 프레임 좌우 반전 (거울 효과)
             frame = cv2.flip(frame, 1)
 
             # 포즈 추정 수행
             try:
-                # MMPose Inferencer 호출 (return_vis=True로 시각화 결과 받기)
+                # MMPose Inferencer 호출
                 results = list(inferencer(
                     frame,
                     show=False,
-                    return_vis=True,  # 시각화 결과 반환
+                    return_vis=True,
                     draw_bbox=True,
                     bbox_thr=0.5,
-                    kpt_thr=0.3,
-                    radius=4,
-                    thickness=2
+                    kpt_thr=args.kpt_thr,
+                    radius=args.radius,
+                    thickness=args.thickness
                 ))
                 
-                display_frame = frame.copy()
-                
-                if results and len(results) > 0:
-                    result = results[0]
-                    
-                    # 방법 1: visualization 키가 있는 경우
-                    if isinstance(result, dict) and 'visualization' in result:
-                        vis_data = result['visualization']
-                        if isinstance(vis_data, list) and len(vis_data) > 0:
-                            display_frame = vis_data[0]
-                        elif isinstance(vis_data, np.ndarray):
-                            display_frame = vis_data
-                        print("시각화 데이터 사용됨")
-                    
-                    # 방법 2: predictions가 있는 경우 수동으로 시각화
-                    elif isinstance(result, dict) and 'predictions' in result:
-                        predictions = result['predictions']
-                        if len(predictions) > 0:
-                            # MMPose visualizer 사용해서 직접 그리기
-                            try:
-                                vis_result = inferencer.visualize(
-                                    [frame], 
-                                    predictions,
-                                    return_vis=True,
-                                    show=False,
-                                    draw_bbox=True,
-                                    radius=4,
-                                    thickness=2,
-                                    kpt_thr=0.3
-                                )
-                                if vis_result and len(vis_result) > 0:
-                                    display_frame = vis_result[0]
-                                    print("수동 시각화 성공")
-                            except Exception as vis_e:
-                                print(f"수동 시각화 실패: {vis_e}")
-                                # 간단한 키포인트 그리기
-                                display_frame = draw_simple_pose(frame, predictions)
-                    
-                    # 포즈 검출 상태 표시
-                    cv2.putText(display_frame, f"Poses: {len(predictions) if 'predictions' in locals() else 'Unknown'}", 
-                               (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                else:
-                    cv2.putText(display_frame, "No Pose Detected", (10, 120),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                # 시각화 처리
+                display_frame = handle_mmpose_visualization(
+                    frame, results, inferencer, visualizer)
                     
                 error_count = 0  # 성공하면 오류 카운터 리셋
                 
             except Exception as e:
                 error_count += 1
                 if error_count <= 3:  # 처음 3개 오류만 상세 출력
-                    print(f"추론 오류: {e}")
-                    
-                    # 디버깅: 결과 구조 확인
-                    try:
-                        debug_results = list(inferencer(frame, show=False, return_vis=False))
-                        print(f"결과 개수: {len(debug_results)}")
-                        if debug_results:
-                            print(f"첫 번째 결과 타입: {type(debug_results[0])}")
-                            if isinstance(debug_results[0], dict):
-                                print(f"결과 키들: {list(debug_results[0].keys())}")
-                                if 'predictions' in debug_results[0]:
-                                    pred_count = len(debug_results[0]['predictions'])
-                                    print(f"예측 결과 개수: {pred_count}")
-                    except Exception as debug_e:
-                        print(f"디버깅 실패: {debug_e}")
-                        
+                    print(f"⚠️ 추론 오류: {e}")
                 elif error_count == 4:
-                    print("추론 오류가 계속 발생합니다. 상세 출력을 중단합니다.")
+                    print("⚠️ 추론 오류가 계속 발생합니다. 상세 출력을 중단합니다.")
                     
                 display_frame = frame.copy()
-                cv2.putText(display_frame, "Inference Error", (10, 120),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                display_frame = visualizer.add_info_text(
+                    display_frame, ["Inference Error"], 
+                    position=(10, 120), color=visualizer.COLORS['error'])
 
-            # FPS 계산 및 표시
-            fps_counter += 1
-            if fps_counter % 30 == 0:
-                elapsed = time.time() - start_time
-                fps = 30 / elapsed
-                start_time = time.time()
-                print(f"FPS: {fps:.1f} (오류: {error_count})")
-
-            # FPS와 디바이스 정보를 화면에 표시
+            # FPS 계산 및 업데이트
+            current_fps = update_fps_counter(fps_counter)
+            
+            # 시스템 정보를 화면에 표시
+            info_texts = []
+            
+            # 디바이스 정보
             device_text = f"Device: {args.device}"
             if XPU_AVAILABLE and not args.device.startswith('xpu'):
                 device_text += " (XPU Available)"
-                
-            cv2.putText(display_frame, device_text, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            info_texts.append(device_text)
             
-            if fps_counter >= 30:
-                elapsed = time.time() - start_time + 1
-                fps = fps_counter / elapsed
-                cv2.putText(display_frame, f"FPS: {fps:.1f}", (10, 60),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-            # 오류 발생 시 화면에 표시
+            # 모드 정보
+            info_texts.append(f"Mode: {mode_text}")
+            
+            # FPS 정보
+            if current_fps > 0:
+                info_texts.append(f"FPS: {current_fps:.1f}")
+            
+            # 프레임 정보
+            info_texts.append(f"Frame: {frame_count}")
+            
+            # 오류 정보
             if error_count > 0:
-                cv2.putText(display_frame, f"Inference Errors: {error_count}", (10, 90),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                info_texts.append(f"Errors: {error_count}")
+            
+            # 정보 텍스트 추가
+            display_frame = visualizer.add_info_text(display_frame, info_texts)
 
-            cv2.imshow('RTMPose-x Demo', display_frame)
-
-            # 'q' 키로 종료
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            # 파일 저장 모드
+            if args.save_frames:
+                if frame_count % 30 == 0:  # 30프레임마다 저장
+                    filename = f"output_frame_{frame_count:06d}.jpg"
+                    cv2.imwrite(filename, display_frame)
+                    print(f"💾 프레임 저장: {filename}")
+                
+                # 파일 저장 모드에서는 100프레임 후 종료
+                if frame_count >= 100:
+                    print("📁 100프레임 저장 완료!")
+                    break
+            else:
+                # GUI 모드
+                try:
+                    cv2.imshow(f'RTMPose {mode_text} Demo', display_frame)
+                    
+                    # 'q' 키로 종료
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        print("\n⌨️ 'q' 키로 종료")
+                        break
+                    elif key == ord('s'):  # 's' 키로 스크린샷
+                        filename = f"screenshot_{int(time.time())}.jpg"
+                        cv2.imwrite(filename, display_frame)
+                        print(f"📸 스크린샷 저장: {filename}")
+                        
+                except Exception as gui_e:
+                    print(f"⚠️ GUI 오류: {gui_e}")
+                    print("💾 파일 저장 모드로 전환합니다...")
+                    args.save_frames = True
 
     except KeyboardInterrupt:
-        print("\n키보드 인터럽트로 종료")
+        print("\n⌨️ 키보드 인터럽트로 종료")
 
     finally:
         cap.release()
-        cv2.destroyAllWindows()
-        print("정리 완료!")
-
-
-def draw_simple_pose(image, predictions):
-    """간단한 포즈 그리기 함수"""
-    import numpy as np
-    
-    display_img = image.copy()
-    
-    try:
-        for pred in predictions:
-            if hasattr(pred, 'pred_instances'):
-                instances = pred.pred_instances
-                if hasattr(instances, 'keypoints'):
-                    keypoints = instances.keypoints
-                    scores = getattr(instances, 'keypoint_scores', None)
-                    
-                    # 키포인트 그리기
-                    for i, (kpt, score) in enumerate(zip(keypoints[0], scores[0] if scores is not None else [1.0]*len(keypoints[0]))):
-                        if score > 0.3:  # 임계값 이상인 키포인트만 그리기
-                            x, y = int(kpt[0]), int(kpt[1])
-                            if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                                cv2.circle(display_img, (x, y), 4, (0, 255, 0), -1)
-                                cv2.putText(display_img, str(i), (x+5, y-5), 
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-                    
-                    # 간단한 스켈레톤 연결 (COCO 17 포인트 기준)
-                    skeleton_links = [
-                        (0, 1), (0, 2), (1, 3), (2, 4),  # 머리
-                        (5, 6), (5, 7), (6, 8), (7, 9), (8, 10),  # 팔
-                        (5, 11), (6, 12), (11, 12),  # 몸통
-                        (11, 13), (12, 14), (13, 15), (14, 16)  # 다리
-                    ]
-                    
-                    for link in skeleton_links:
-                        if link[0] < len(keypoints[0]) and link[1] < len(keypoints[0]):
-                            kpt1, kpt2 = keypoints[0][link[0]], keypoints[0][link[1]]
-                            score1 = scores[0][link[0]] if scores is not None else 1.0
-                            score2 = scores[0][link[1]] if scores is not None else 1.0
-                            
-                            if score1 > 0.3 and score2 > 0.3:
-                                x1, y1 = int(kpt1[0]), int(kpt1[1])
-                                x2, y2 = int(kpt2[0]), int(kpt2[1])
-                                cv2.line(display_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-    except Exception as e:
-        print(f"간단한 포즈 그리기 실패: {e}")
-        
-    return display_img
+        if not args.save_frames:
+            cv2.destroyAllWindows()
+        print("✅ 정리 완료!")
 
 
 if __name__ == '__main__':
