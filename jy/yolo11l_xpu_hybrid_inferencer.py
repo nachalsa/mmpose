@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import time
 from typing import List, Tuple, Optional
+from collections import deque
 from mmpose.apis import init_model, inference_topdown
 
 try:
@@ -441,6 +442,146 @@ class YOLO11LXPUHybridInferencer:
         print(f"💾 결과 저장: {output_path}")
         
         return vis_image, results, stats
+    
+    def test_webcam(self, camera_id: int = 0, window_size: Tuple[int, int] = (1280, 720)):
+        """실시간 웹캠 테스트 - YOLO11L 고정확도"""
+        print(f"\n=== YOLO11L 실시간 웹캠 테스트 (카메라 ID: {camera_id}) ===")
+        print("📹 웹캠 연결 중...")
+        
+        cap = cv2.VideoCapture(camera_id)
+        if not cap.isOpened():
+            print(f"❌ 웹캠 열기 실패 (카메라 ID: {camera_id})")
+            return
+        
+        # 웹캠 설정
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, window_size[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, window_size[1])
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        
+        # JPEG 포맷으로 설정
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+        
+        # 실제 웹캠 해상도 확인
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        
+        print(f"✅ 웹캠 연결 성공: {actual_width}x{actual_height}, {actual_fps:.1f}fps")
+        print(f"📹 비디오 포맷: JPEG (MJPG) - {fourcc}")
+        print(f"🎮 조작법:")
+        print(f"   - ESC: 종료")
+        print(f"   - S: 현재 프레임 스크린샷")
+        print(f"   - SPACE: 일시정지/재생")
+        print(f"   - A: 정확도 모드 토글 (높음/표준)")
+        print(f"   - +/-: 신뢰도 임계값 조정")
+        
+        # 성능 측정 변수
+        frame_count = 0
+        fps_history = deque(maxlen=30)
+        paused = False
+        screenshot_count = 0
+        accuracy_mode = True  # 정확도 모드
+        current_conf_thresh = self.yolo_conf_thresh
+        
+        try:
+            while True:
+                if not paused:
+                    ret, frame = cap.read()
+                    if not ret:
+                        print("❌ 프레임 읽기 실패")
+                        break
+                    
+                    # 프레임 처리
+                    start_time = time.time()
+                    vis_frame, results = self.process_frame(frame, conf_thresh=current_conf_thresh)
+                    process_time = time.time() - start_time
+                    
+                    # FPS 계산
+                    fps = 1.0 / process_time if process_time > 0 else 0
+                    fps_history.append(fps)
+                    avg_fps = np.mean(fps_history) if fps_history else 0
+                    
+                    # 추가 정보 표시
+                    info_y = 140
+                    cv2.putText(vis_frame, f"Avg FPS: {avg_fps:.1f}", 
+                               (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis_frame, f"XPU: {self.detection_device}/{self.pose_device}", 
+                               (10, info_y + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis_frame, f"Mode: {'High Accuracy' if accuracy_mode else 'Standard'}", 
+                               (10, info_y + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis_frame, f"Conf: {current_conf_thresh:.2f}", 
+                               (10, info_y + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    
+                    # 검출된 사람 정보
+                    if results:
+                        person_info = f"Persons: {len(results)}"
+                        for i, (_, scores, _, ) in enumerate(results):
+                            valid_kpts = np.sum(scores > 0.3)
+                            high_conf_kpts = np.sum(scores > 0.8)
+                            person_info += f" | P{i+1}: {valid_kpts}/133 ({high_conf_kpts} high)"
+                        cv2.putText(vis_frame, person_info, 
+                                   (10, info_y + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                    
+                    frame_count += 1
+                else:
+                    # 일시정지 상태에서는 마지막 프레임 계속 표시
+                    pass
+                
+                # 화면 표시
+                cv2.imshow('YOLO11L + RTMW Real-time (High Accuracy XPU)', vis_frame)
+                
+                # 키 입력 처리
+                key = cv2.waitKey(1) & 0xFF
+                
+                if key == 27:  # ESC
+                    break
+                elif key == ord('s') or key == ord('S'):  # 스크린샷
+                    screenshot_name = f"yolo11l_webcam_screenshot_{screenshot_count:04d}.jpg"
+                    cv2.imwrite(screenshot_name, vis_frame)
+                    print(f"📸 스크린샷 저장: {screenshot_name}")
+                    screenshot_count += 1
+                elif key == ord(' '):  # 일시정지/재생
+                    paused = not paused
+                    print(f"⏸️ {'일시정지' if paused else '재생'}")
+                elif key == ord('a') or key == ord('A'):  # 정확도 모드 토글
+                    accuracy_mode = not accuracy_mode
+                    if accuracy_mode:
+                        current_conf_thresh = 0.4
+                        self.detection_img_size = 832
+                        print("🎯 고정확도 모드 활성화")
+                    else:
+                        current_conf_thresh = 0.6
+                        self.detection_img_size = 640
+                        print("⚡ 표준 속도 모드 활성화")
+                elif key == ord('+') or key == ord('='):  # 신뢰도 증가
+                    current_conf_thresh = min(0.9, current_conf_thresh + 0.05)
+                    print(f"📈 신뢰도 임계값: {current_conf_thresh:.2f}")
+                elif key == ord('-'):  # 신뢰도 감소
+                    current_conf_thresh = max(0.1, current_conf_thresh - 0.05)
+                    print(f"📉 신뢰도 임계값: {current_conf_thresh:.2f}")
+                
+                # 성능 통계 주기적 출력
+                if frame_count % 60 == 0 and frame_count > 0:
+                    print(f"📊 프레임 {frame_count}: 평균 {avg_fps:.1f}fps, "
+                          f"{len(results)}명 검출 (신뢰도: {current_conf_thresh:.2f})")
+                    
+        except KeyboardInterrupt:
+            print("\n⏹️ 사용자가 웹캠 테스트를 중단했습니다.")
+        
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()
+            
+            # 최종 통계
+            if fps_history:
+                final_avg_fps = np.mean(fps_history)
+                print(f"\n📊 YOLO11L 웹캠 테스트 완료:")
+                print(f"   - 처리된 프레임: {frame_count}")
+                print(f"   - 평균 FPS: {final_avg_fps:.1f}")
+                print(f"   - 사용된 디바이스: 검출({self.detection_device}), 포즈({self.pose_device})")
+                print(f"   - 스크린샷: {screenshot_count}개 저장")
+                print(f"   - 최종 신뢰도 임계값: {current_conf_thresh:.2f}")
 
 def main():
     """메인 테스트 함수"""
@@ -464,6 +605,13 @@ def main():
         # 테스트 이미지
         test_image = "winter01.jpg"
         inferencer.test_single_image(test_image)
+        
+        # 실시간 웹캠 테스트
+        print(f"\n🎥 YOLO11L 실시간 웹캠 테스트를 시작하시겠습니까? (y/n): ", end="")
+        choice = input().strip().lower()
+        
+        if choice == 'y':
+            inferencer.test_webcam()
         
         print(f"\n🏆 YOLO11L 하이브리드 시스템 특징:")
         print(f"   🎯 최고 정확도: Large 모델로 더 정확한 사람 검출")
