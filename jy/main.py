@@ -7,12 +7,91 @@ RTMW-x Intel XPU 추론 메인 실행 파일
 import cv2
 import time
 import traceback
+import argparse
+import os
 
 from detector import SimplePersonDetector
 from pose_estimator import RTMWXEstimator
 from visualizer import RTMWVisualizer
 from utils import find_and_download_rtmw_model, check_xpu_availability
 from config import DEFAULT_DEVICE, RTMW_INPUT_SIZE, DEFAULT_CONF_THRESH, FPS_UPDATE_INTERVAL
+
+
+def test_image(image_path: str):
+    """단일 이미지 테스트 함수"""
+    print(f"=== RTMW-x 이미지 테스트: {image_path} ===")
+    
+    # 이미지 파일 존재 확인
+    if not os.path.exists(image_path):
+        print(f"❌ 이미지 파일을 찾을 수 없습니다: {image_path}")
+        return
+    
+    # Intel XPU 가용성 확인
+    if not check_xpu_availability():
+        return
+    
+    device = DEFAULT_DEVICE
+    
+    # RTMW 모델 찾기 및 다운로드
+    model_path, model_description = find_and_download_rtmw_model()
+    
+    if model_path is None:
+        print("❌ RTMW 모델을 찾을 수 없습니다.")
+        return
+    
+    try:
+        # 검출기, 포즈 추정기, 시각화기 초기화
+        print("모델 로딩 중...")
+        person_detector = SimplePersonDetector(device=device)
+        rtmw_estimator = RTMWXEstimator(model_path, device=device)
+        visualizer = RTMWVisualizer()
+        print(f"✅ RTMW-x 모델 로딩 완료: {model_description}")
+        
+        # 이미지 로드
+        frame = cv2.imread(image_path)
+        if frame is None:
+            print(f"❌ 이미지를 읽을 수 없습니다: {image_path}")
+            return
+        
+        print(f"📷 이미지 크기: {frame.shape[:2]}")
+        original_frame = frame.copy()
+        
+        # 1. 인체 검출
+        print("🔍 인체 검출 중...")
+        person_boxes = person_detector.detect_persons(frame, conf_thresh=DEFAULT_CONF_THRESH)
+        print(f"🧑 검출된 사람 수: {len(person_boxes)}")
+        
+        # 2. 각 검출된 사람에 대해 RTMW-x WholeBody 포즈 추정 및 시각화
+        for i, bbox in enumerate(person_boxes):
+            try:
+                print(f"🎯 사람 {i+1} 포즈 추정 중... bbox: {bbox}")
+                keypoints = rtmw_estimator.estimate_pose(frame, bbox)
+                
+                # 시각화 (키포인트 + 스켈레톤 + 바운딩박스)
+                frame = visualizer.visualize_pose(frame, keypoints, bbox, person_id=i)
+                
+            except Exception as e:
+                print(f"❌ 사람 {i+1} 포즈 추정 실패: {e}")
+                traceback.print_exc()
+        
+        # 정보 표시
+        frame = visualizer.draw_info(frame, 1, len(person_boxes), 0, "RTMW-x")
+        
+        # 결과 저장
+        output_path = f"rtmw_result_{os.path.basename(image_path)}"
+        cv2.imwrite(output_path, frame)
+        print(f"💾 결과 저장: {output_path}")
+        
+        # 결과 표시
+        cv2.imshow('Original Image', original_frame)
+        cv2.imshow(f'RTMW-x Result ({RTMW_INPUT_SIZE[0]}x{RTMW_INPUT_SIZE[1]})', frame)
+        print("🖼️  결과 이미지를 표시합니다. 아무 키나 누르면 종료됩니다.")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        
+    except Exception as e:
+        print(f"❌ 오류 발생: {e}")
+        traceback.print_exc()
 
 
 def main():
@@ -113,4 +192,15 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='RTMW-x WholeBody 포즈 추정')
+    parser.add_argument('--image', type=str, default=None,
+                        help='테스트할 이미지 파일 경로 (지정하지 않으면 웹캠 사용)')
+    
+    args = parser.parse_args()
+    
+    if args.image:
+        # 이미지 파일 테스트
+        test_image(args.image)
+    else:
+        # 웹캠 테스트
+        main()
