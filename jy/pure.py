@@ -18,16 +18,52 @@ class SimplePersonDetector:
     
     def __init__(self, device='xpu:0'):
         self.device = device
+        
+        # 모델 경로 설정
+        models_dir = "./models"
+        yolo_model_filename = "yolo11m.pt"
+        yolo_model_path = os.path.join(models_dir, yolo_model_filename)
+        
+        # models 디렉토리 생성
+        os.makedirs(models_dir, exist_ok=True)
+        
         try:
             from ultralytics import YOLO
-            # YOLOv11 모델 로드 (가장 최신)
-            self.model = YOLO('yolo11m.pt')  # 또는 yolo11x.pt (더 정확)
+            
+            # 로컬 모델 파일 확인
+            if os.path.exists(yolo_model_path):
+                print(f"✅ YOLOv11 모델 발견: {yolo_model_path}")
+                self.model = YOLO(yolo_model_path)
+            else:
+                print(f"YOLOv11 모델이 없습니다. 다운로드 중: {yolo_model_filename}")
+                # Ultralytics에서 자동 다운로드 (모델을 지정된 경로에 저장)
+                self.model = YOLO('yolo11m.pt')
+                
+                # 다운로드된 모델을 models 폴더로 복사
+                import shutil
+                from pathlib import Path
+                
+                # Ultralytics 캐시 경로에서 다운로드된 모델 찾기
+                ultralytics_cache = Path.home() / '.ultralytics' / 'models'
+                downloaded_model = ultralytics_cache / 'yolo11m.pt'
+                
+                if downloaded_model.exists():
+                    shutil.copy2(str(downloaded_model), yolo_model_path)
+                    print(f"✅ YOLOv11 모델 저장: {yolo_model_path}")
+                else:
+                    print("⚠️ 모델 다운로드는 완료되었지만 복사에 실패했습니다.")
+            
+            # 모델을 XPU로 이동
             self.model.to(device)
             print("✅ YOLOv11 모델 로드 완료")
+            
         except ImportError:
             print("❌ ultralytics 패키지가 필요합니다: pip install ultralytics")
             raise
-        
+        except Exception as e:
+            print(f"❌ YOLOv11 모델 로드 실패: {e}")
+            raise
+    
     def detect_persons(self, image: np.ndarray, conf_thresh: float = 0.5):
         """YOLOv11으로 사람 검출"""
         # 추론 (Person 클래스만, conf 임계값 적용)
