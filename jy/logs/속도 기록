@@ -1,0 +1,351 @@
+🚀 하이브리드 포즈 추정 시스템 성능 비교 시작
+📷 테스트 이미지 준비 중...
+   ✅ winter01.jpg: (1350, 1080, 3)
+   ✅ winter01.jpg_640x480: (480, 640, 3)
+   ✅ winter01.jpg_1280x720: (720, 1280, 3)
+   ✅ winter01.jpg_1920x1080: (1080, 1920, 3)
+📊 총 4개 테스트 이미지 준비 완료
+
+🔧 기존 하이브리드 시스템 벤치마크 (5회)
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 RTMW 하이브리드 추론기 초기화:
+   - 포즈 추정 디바이스: xpu
+🔧 포즈 추정 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ 포즈 모델 로딩 완료: 1.25초
+   📷 테스트 중: winter01.jpg
+/home/ty/rtmw/02/.venv/lib/python3.12/site-packages/mmpose/models/utils/csp_layer.py:32: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/home/ty/rtmw/02/.venv/lib/python3.12/site-packages/mmpose/models/backbones/csp_darknet.py:118: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+      ✅ 평균: 47.1ms, FPS: 21.2
+   📷 테스트 중: winter01.jpg_640x480
+      ✅ 평균: 42.7ms, FPS: 23.4
+   📷 테스트 중: winter01.jpg_1280x720
+      ✅ 평균: 42.7ms, FPS: 23.4
+   📷 테스트 중: winter01.jpg_1920x1080
+      ✅ 평균: 44.6ms, FPS: 22.4
+
+🚀 YOLO11 하이브리드 시스템 벤치마크 (5회)
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 0.34초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 1.21초
+   📷 테스트 중: winter01.jpg
+🔍 YOLO11 검출 결과: 1명, 2.708초
+🔍 YOLO11 검출 결과: 1명, 0.015초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.016초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.016초
+      ✅ 평균: 60.6ms, FPS: 16.5
+   📷 테스트 중: winter01.jpg_640x480
+🔍 YOLO11 검출 결과: 1명, 0.832초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.015초
+🔍 YOLO11 검출 결과: 1명, 0.013초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+      ✅ 평균: 53.9ms, FPS: 18.5
+   📷 테스트 중: winter01.jpg_1280x720
+🔍 YOLO11 검출 결과: 1명, 0.689초
+🔍 YOLO11 검출 결과: 1명, 0.013초
+🔍 YOLO11 검출 결과: 1명, 0.013초
+🔍 YOLO11 검출 결과: 1명, 0.012초
+🔍 YOLO11 검출 결과: 1명, 0.012초
+🔍 YOLO11 검출 결과: 1명, 0.013초
+🔍 YOLO11 검출 결과: 1명, 0.012초
+      ✅ 평균: 52.9ms, FPS: 18.9
+   📷 테스트 중: winter01.jpg_1920x1080
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.012초
+🔍 YOLO11 검출 결과: 1명, 0.014초
+🔍 YOLO11 검출 결과: 1명, 0.013초
+🔍 YOLO11 검출 결과: 1명, 0.013초
+🔍 YOLO11 검출 결과: 1명, 0.012초
+      ✅ 평균: 57.7ms, FPS: 17.3
+
+📊 성능 비교 분석
+================================================================================
+이미지                  기존 FPS     YOLO11 FPS   향상률        검출 정확도      
+--------------------------------------------------------------------------------
+winter01.jpg         21.2       16.5         -22.3     % 1.0         
+winter01.jpg_640x480 23.4       18.5         -20.8     % 1.0         
+winter01.jpg_1280x720 23.4       18.9         -19.3     % 1.0         
+winter01.jpg_1920x1080 22.4       17.3         -22.7     % 1.0         
+--------------------------------------------------------------------------------
+평균                   22.6       17.8         -21.2     %
+
+🏆 성능 개선 요약:
+   - 기존 시스템 평균 FPS: 22.6
+   - YOLO11 하이브리드 평균 FPS: 17.8
+   - 성능 향상: -21.2%
+
+💻 디바이스 정보:
+   - 기존 시스템: 간단한 검출 + XPU 포즈 추정
+   - YOLO11 시스템: XPU 검출 + XPU 포즈 추정
+💾 상세 결과 저장: hybrid_performance_comparison_1754245444.json
+
+✅ 성능 비교 완료
+(.venv) ty@ty:~/rtmw/02/mmpose/jy$ python optimized_yolo11_xpu_inferencer.py
+2025-08-04 03:28:20.208914: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-08-04 03:28:20.209524: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:32] Could not find cuda drivers on your machine, GPU will not be used.
+2025-08-04 03:28:20.212451: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:32] Could not find cuda drivers on your machine, GPU will not be used.
+2025-08-04 03:28:20.219735: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1754245700.232126 2334533 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1754245700.235631 2334533 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1754245700.246030 2334533 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1754245700.246051 2334533 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1754245700.246053 2334533 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1754245700.246056 2334533 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2025-08-04 03:28:20.249177: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI AVX_VNNI_INT8 AVX_NE_CONVERT FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+🚀 최적화된 YOLO11 + RTMW XPU 하이브리드 추론기 테스트
+
+============================================================
+🧪 Nano - 초고속 모델 테스트: yolo11n.pt
+============================================================
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 최적화된 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - YOLO 모델: yolo11n.pt
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+   - 속도 최적화: ON
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+📥 YOLO11 모델 다운로드 중: yolo11n.pt
+Downloading https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt to '../models/yolo11n.
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 1.44초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 1.58초
+⚡ 속도 최적화 설정 적용 중...
+✅ 속도 최적화 설정 완료
+
+=== 최적화된 YOLO11 + RTMW 테스트: winter01.jpg ===
+📷 이미지 크기: (1350, 1080, 3)
+/home/ty/rtmw/02/.venv/lib/python3.12/site-packages/mmpose/models/utils/csp_layer.py:32: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/home/ty/rtmw/02/.venv/lib/python3.12/site-packages/mmpose/models/backbones/csp_darknet.py:118: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+✅ 검출된 사람 수: 1
+   사람 1: 133/133 키포인트 (신뢰도 > 0.3)
+🏃 최적화된 성능 벤치마크 (20회)...
+   진행률: 10/20
+   진행률: 20/20
+
+📊 최적화된 성능 통계:
+   detection:
+     - 평균: 13.0ms
+     - 최소/최대: 12.2/14.3ms
+   pose:
+     - 평균: 39.3ms
+     - 최소/최대: 37.2/46.5ms
+   total:
+     - 평균: 53.6ms
+     - 최소/최대: 50.4/60.8ms
+     - FPS: 18.7
+💾 결과 저장: optimized_yolo11_result_winter01.jpg
+
+============================================================
+🧪 Small - 고속 모델 테스트: yolo11s.pt
+============================================================
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 최적화된 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - YOLO 모델: yolo11s.pt
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+   - 속도 최적화: ON
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+📥 YOLO11 모델 다운로드 중: yolo11s.pt
+Downloading https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt to '../models/yolo11s.
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 0.93초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 1.04초
+⚡ 속도 최적화 설정 적용 중...
+✅ 속도 최적화 설정 완료
+
+=== 최적화된 YOLO11 + RTMW 테스트: winter01.jpg ===
+📷 이미지 크기: (1350, 1080, 3)
+/home/ty/rtmw/02/.venv/lib/python3.12/site-packages/mmpose/models/utils/csp_layer.py:32: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+/home/ty/rtmw/02/.venv/lib/python3.12/site-packages/mmpose/models/backbones/csp_darknet.py:118: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+✅ 검출된 사람 수: 1
+   사람 1: 133/133 키포인트 (신뢰도 > 0.3)
+🏃 최적화된 성능 벤치마크 (20회)...
+   진행률: 10/20
+   진행률: 20/20
+
+📊 최적화된 성능 통계:
+   detection:
+     - 평균: 11.5ms
+     - 최소/최대: 10.7/13.8ms
+   pose:
+     - 평균: 38.0ms
+     - 최소/최대: 36.4/44.0ms
+   total:
+     - 평균: 50.6ms
+     - 최소/최대: 48.6/56.3ms
+     - FPS: 19.8
+💾 결과 저장: optimized_yolo11_result_winter01.jpg
+
+============================================================
+🧪 Medium - 균형 모델 테스트: yolo11m.pt
+============================================================
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 최적화된 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - YOLO 모델: yolo11m.pt
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+   - 속도 최적화: ON
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 0.27초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 0.96초
+⚡ 속도 최적화 설정 적용 중...
+✅ 속도 최적화 설정 완료
+
+=== 최적화된 YOLO11 + RTMW 테스트: winter01.jpg ===
+📷 이미지 크기: (1350, 1080, 3)
+✅ 검출된 사람 수: 1
+   사람 1: 133/133 키포인트 (신뢰도 > 0.3)
+🏃 최적화된 성능 벤치마크 (20회)...
+   진행률: 10/20
+   진행률: 20/20
+
+📊 최적화된 성능 통계:
+   detection:
+     - 평균: 16.0ms
+     - 최소/최대: 14.6/16.8ms
+   pose:
+     - 평균: 38.8ms
+     - 최소/최대: 36.1/50.3ms
+   total:
+     - 평균: 56.0ms
+     - 최소/최대: 53.2/67.8ms
+     - FPS: 17.8
+💾 결과 저장: optimized_yolo11_result_winter01.jpg
+(.venv) ty@ty:~/rtmw/02/mmpose/jy$ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 최적화된 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - YOLO 모델: yolo11n.pt
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+   - 속도 최적화: ON
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 0.23초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 0.80초
+⚡ 속도 최적화 설정 적용 중...
+✅ 속도 최적화 설정 완료
+✅ 평균 FPS: 18.8
+✅ 평균 검출: 1.0명
+✅ 평균 키포인트: 133.0/133
+
+⚡ 최적화된 YOLO11 테스트: Small
+--------------------------------------------------
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 최적화된 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - YOLO 모델: yolo11s.pt
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+   - 속도 최적화: ON
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 0.17초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 0.98초
+⚡ 속도 최적화 설정 적용 중...
+✅ 속도 최적화 설정 완료
+✅ 평균 FPS: 19.3
+✅ 평균 검출: 1.0명
+✅ 평균 키포인트: 133.0/133
+
+⚡ 최적화된 YOLO11 테스트: Medium
+--------------------------------------------------
+✅ Intel XPU 사용 가능: 1개 디바이스
+🚀 최적화된 YOLO11 + RTMW 하이브리드 추론기 초기화:
+   - YOLO 모델: yolo11m.pt
+   - 검출 디바이스: xpu
+   - 포즈 추정 디바이스: xpu
+   - 속도 최적화: ON
+🔧 YOLO11 검출 모델 로딩 중... (디바이스: xpu)
+✅ YOLO11 XPU 모드 활성화
+✅ YOLO11 검출 모델 로딩 완료: 0.55초
+🔧 RTMW 포즈 모델 로딩 중... (디바이스: xpu)
+Loads checkpoint by local backend from path: ../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth
+✅ RTMW 포즈 모델 로딩 완료: 0.82초
+⚡ 속도 최적화 설정 적용 중...
+✅ 속도 최적화 설정 완료
+✅ 평균 FPS: 17.2
+✅ 평균 검출: 1.0명
+✅ 평균 키포인트: 133.0/133
+
+================================================================================
+📊 종합 성능 비교 결과
+================================================================================
+시스템                                 FPS      키포인트       검출수      검출방식                
+--------------------------------------------------------------------------------
+기존 하이브리드 (간단한 검출 + XPU 포즈)          25.1     133.0      1.0      간단한 박스              
+YOLO11 하이브리드 (Small)                19.4     133.0      1.0      YOLO11 yolo11s.pt   
+최적화된 YOLO11 (Small)                 19.3     133.0      1.0      최적화된 YOLO11 yolo11s.pt
+최적화된 YOLO11 (Nano)                  18.8     133.0      1.0      최적화된 YOLO11 yolo11n.pt
+YOLO11 하이브리드 (Nano)                 18.6     133.0      1.0      YOLO11 yolo11n.pt   
+최적화된 YOLO11 (Medium)                17.2     133.0      1.0      최적화된 YOLO11 yolo11m.pt
+YOLO11 하이브리드 (Medium)               17.0     133.0      1.0      YOLO11 yolo11m.pt   
+--------------------------------------------------------------------------------
+
+🏆 성능 분석:
+   🚀 최고 FPS: 기존 하이브리드 (간단한 검출 + XPU 포즈) (25.1 FPS)
+   🎯 최고 정확도: 기존 하이브리드 (간단한 검출 + XPU 포즈) (133.0 키포인트)
+
+📈 기존 시스템 대비 개선률:
+   ⬇️ YOLO11 하이브리드 (Small): -22.4%
+   ⬇️ 최적화된 YOLO11 (Small): -22.8%
+   ⬇️ 최적화된 YOLO11 (Nano): -25.0%
+   ⬇️ YOLO11 하이브리드 (Nano): -25.9%
+   ⬇️ 최적화된 YOLO11 (Medium): -31.3%
+   ⬇️ YOLO11 하이브리드 (Medium): -32.3%
+
+💡 추천 시스템:
+   🏃 속도 우선: 기존 하이브리드 (간단한 검출 + XPU 포즈) (25.1 FPS)
+   ⚖️ 균형 우선: 기존 하이브리드 (간단한 검출 + XPU 포즈) (종합점수: 3331.9)
+   🎯 정확도 우선: 기존 하이브리드 (간단한 검출 + XPU 포즈) (133.0 키포인트)
+
+💾 상세 결과 저장: comprehensive_performance_test_1754245856.json
+
+✅ 종합 성능 테스트 완료!
+🎯 추천: 실시간 용도에는 최적화된 YOLO11s 사용
+⚡ 최고 속도가 필요하면 최적화된 YOLO11n 사용
+🎪 최고 정확도가 필요하면 최적화된 YOLO11m 사용
