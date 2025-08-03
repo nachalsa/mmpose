@@ -18,15 +18,15 @@ class RTMWSimCCDecoder:
                  simcc_split_ratio: float = RTMW_SIMCC_SPLIT_RATIO):
         """
         Args:
-            input_size: 모델 입력 크기 (H, W) = (384, 288)
+            input_size: 모델 입력 크기 (W, H) = (288, 384)
             num_keypoints: 키포인트 수 (133)
             simcc_split_ratio: SimCC split ratio (2.0, X/Y 공통)
         """
-        self.input_height, self.input_width = input_size  # H=384, W=288
+        self.input_width, self.input_height = input_size  # W=288, H=384
         self.num_keypoints = num_keypoints
         self.simcc_split_ratio = simcc_split_ratio
         
-        # SimCC 차원 계산 - 올바른 공식 (H=384, W=288)
+        # SimCC 차원 계산 - 올바른 공식 (W=288, H=384)
         self.simcc_x_dim = int(self.input_width * simcc_split_ratio)   # 288 * 2.0 = 576
         self.simcc_y_dim = int(self.input_height * simcc_split_ratio)  # 384 * 2.0 = 768
         

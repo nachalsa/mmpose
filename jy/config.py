@@ -14,8 +14,8 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 # 디바이스 설정
 DEFAULT_DEVICE = 'xpu:0'
 
-# 모델 설정 - 올바른 384x288 해석 (H=384, W=288)
-RTMW_INPUT_SIZE = (384, 288)  # Height=384, Width=288
+# 모델 설정 - 올바른 288x384 해석 (W=288, H=384)
+RTMW_INPUT_SIZE = (288, 384)  # Width=288, Height=384 (MMPose 표준)
 RTMW_NUM_KEYPOINTS = 133
 RTMW_SIMCC_SPLIT_RATIO = 2.0  # X/Y 공통 split ratio
 

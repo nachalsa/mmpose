@@ -30,10 +30,10 @@ class RTMWXEstimator:
         """
         self.model_path = model_path
         self.device = device
-        self.input_size = RTMW_INPUT_SIZE  # (384, 288)
+        self.input_size = RTMW_INPUT_SIZE  # (288, 384) - W=288, H=384
         
-        # 입력 크기 속성 추가
-        self.input_height, self.input_width = self.input_size  # H=384, W=288
+        # 입력 크기 속성 추가 (MMPose 표준: Width, Height 순서)
+        self.input_width, self.input_height = self.input_size  # W=288, H=384
         
         # PyTorch 모델 로드
         self.model = self._load_pytorch_model()
@@ -66,6 +66,24 @@ class RTMWXEstimator:
             else:
                 state_dict = checkpoint
             
+            # 실제 가중치 구조 분석
+            print(f"\n🔍 실제 체크포인트 가중치 분석:")
+            all_keys = list(state_dict.keys())
+            backbone_keys = [k for k in all_keys if 'backbone' in k and 'weight' in k]
+            neck_keys = [k for k in all_keys if 'neck' in k and 'weight' in k]  
+            head_keys = [k for k in all_keys if 'head' in k and 'weight' in k]
+            
+            print(f"   - 전체 레이어: {len(all_keys)}개")
+            print(f"   - 백본 가중치: {len(backbone_keys)}개")
+            print(f"   - 넥 가중치: {len(neck_keys)}개")
+            print(f"   - 헤드 가중치: {len(head_keys)}개")
+            
+            # 주요 가중치 몇 개 출력
+            print(f"\n📋 주요 가중치 레이어:")
+            for i, key in enumerate(sorted(all_keys)[:10]):
+                if 'weight' in key:
+                    print(f"   - {key}: {state_dict[key].shape}")
+            
             # state_dict에서 실제 차원 분석
             head_dims = self._analyze_head_dimensions(state_dict)
             
@@ -78,17 +96,15 @@ class RTMWXEstimator:
             model_state = model.state_dict()
             loaded_keys = []
             
-            # 백본 가중치 매핑 (간소화된 백본에 일부 적용)
-            backbone_mapping = self._map_backbone_weights(state_dict, model_state)
-            loaded_keys.extend(backbone_mapping)
-            
-            # 헤드 가중치 매핑 (SimCC 레이어)
-            head_mapping = self._map_head_weights(state_dict, model_state)
-            loaded_keys.extend(head_mapping)
+            # 실제 MMPose 가중치를 간소화된 모델에 적응적으로 매핑
+            loaded_keys.extend(self._map_backbone_weights_adaptive(state_dict, model_state))
+            loaded_keys.extend(self._map_neck_weights_adaptive(state_dict, model_state))
+            loaded_keys.extend(self._map_head_weights_adaptive(state_dict, model_state))
             
             print(f"📊 가중치 로딩 결과:")
             print(f"   - 매핑된 레이어: {len(loaded_keys)}개")
             print(f"   - 전체 모델 파라미터: {len(model_state)}개")
+            print(f"   - 로딩 비율: {len(loaded_keys)/len(model_state)*100:.1f}%")
             
             # 디바이스로 이동
             model = model.to(self.device)
@@ -107,63 +123,187 @@ class RTMWXEstimator:
             traceback.print_exc()
             raise
     
-    def _map_backbone_weights(self, state_dict: Dict[str, torch.Tensor], 
-                            model_state: Dict[str, torch.Tensor]) -> List[str]:
-        """백본 가중치 매핑"""
-        print("🔄 백본 가중치 매핑...")
+    def _map_backbone_weights_adaptive(self, state_dict: Dict[str, torch.Tensor], 
+                                      model_state: Dict[str, torch.Tensor]) -> List[str]:
+        """적응적 백본 가중치 매핑 (더 많은 레이어 매핑)"""
+        print("🔄 적응적 백본 가중치 매핑...")
         loaded_keys = []
         
-        # 첫 번째 conv 레이어 매핑
-        if 'backbone.stem.conv.weight' in state_dict:
-            src_weight = state_dict['backbone.stem.conv.weight']
-            if src_weight.shape[0] >= 80:  # 출력 채널이 충분한 경우
-                model_state['backbone.0.weight'] = src_weight[:80].clone()
-                loaded_keys.append('backbone.0.weight')
-                print(f"   - stem conv: {src_weight.shape} -> {model_state['backbone.0.weight'].shape}")
+        # MMPose backbone.stem -> 우리 모델의 첫 번째 레이어들 매핑
+        stem_mappings = [
+            ('backbone.stem.conv.weight', 'backbone.0.weight'),
+            ('backbone.stem.bn.weight', 'backbone.1.weight'), 
+            ('backbone.stem.bn.bias', 'backbone.1.bias'),
+            ('backbone.stem.bn.running_mean', 'backbone.1.running_mean'),
+            ('backbone.stem.bn.running_var', 'backbone.1.running_var'),
+        ]
         
-        # 배치놈 매핑
-        if 'backbone.stem.bn.weight' in state_dict and 'backbone.stem.bn.bias' in state_dict:
-            bn_weight = state_dict['backbone.stem.bn.weight']
-            bn_bias = state_dict['backbone.stem.bn.bias']
-            if bn_weight.shape[0] >= 80:
-                model_state['backbone.1.weight'] = bn_weight[:80].clone()
-                model_state['backbone.1.bias'] = bn_bias[:80].clone()
-                loaded_keys.extend(['backbone.1.weight', 'backbone.1.bias'])
-                print(f"   - stem bn: {bn_weight.shape} -> 80")
+        for src_key, dst_key in stem_mappings:
+            if src_key in state_dict and dst_key in model_state:
+                src_weight = state_dict[src_key]
+                dst_weight = model_state[dst_key]
+                
+                # 채널 수가 다르면 일부만 사용
+                if src_weight.shape != dst_weight.shape:
+                    try:
+                        if len(src_weight.shape) == 4 and len(dst_weight.shape) == 4:  # 컨볼루션 가중치
+                            # 출력 채널 맞추기
+                            min_out = min(src_weight.shape[0], dst_weight.shape[0])
+                            min_in = min(src_weight.shape[1], dst_weight.shape[1])
+                            min_h = min(src_weight.shape[2], dst_weight.shape[2])
+                            min_w = min(src_weight.shape[3], dst_weight.shape[3])
+                            model_state[dst_key][:min_out, :min_in, :min_h, :min_w].copy_(
+                                src_weight[:min_out, :min_in, :min_h, :min_w]
+                            )
+                        elif len(src_weight.shape) == 1 and len(dst_weight.shape) == 1:  # BN 가중치
+                            min_dim = min(src_weight.shape[0], dst_weight.shape[0])
+                            model_state[dst_key][:min_dim].copy_(src_weight[:min_dim])
+                        loaded_keys.append(dst_key)
+                        print(f"   - {src_key} -> {dst_key}: {src_weight.shape} -> {dst_weight.shape} (부분)")
+                    except (IndexError, RuntimeError) as e:
+                        print(f"   - {src_key} -> {dst_key}: 매핑 실패 ({e})")
+                        continue
+                else:
+                    model_state[dst_key] = src_weight.clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key} -> {dst_key}: {src_weight.shape} (완전)")
         
-        print(f"✅ 백본 가중치 매핑 완료: {len(loaded_keys)}개")
+        # Stage별 매핑 시도
+        stage_patterns = [
+            ('backbone.stage1', 'backbone.3'),  # 첫 번째 stage
+            ('backbone.stage1', 'backbone.4'),  # BN
+            ('backbone.stage2', 'backbone.6'),  # 두 번째 stage  
+            ('backbone.stage2', 'backbone.7'),  # BN
+        ]
+        
+        for src_pattern, dst_layer in stage_patterns:
+            # 패턴에 맞는 키 찾기
+            matching_keys = [k for k in state_dict.keys() if src_pattern in k and 'conv' in k and 'weight' in k]
+            if matching_keys and dst_layer + '.weight' in model_state:
+                src_key = matching_keys[0]  # 첫 번째 매칭 키 사용
+                dst_key = dst_layer + '.weight'
+                
+                src_weight = state_dict[src_key]
+                dst_weight = model_state[dst_key]
+                
+                # 크기 맞추기 (차원 안전성 체크)
+                if len(src_weight.shape) == 4 and len(dst_weight.shape) == 4:
+                    try:
+                        min_out = min(src_weight.shape[0], dst_weight.shape[0])
+                        min_in = min(src_weight.shape[1], dst_weight.shape[1])
+                        min_h = min(src_weight.shape[2], dst_weight.shape[2])
+                        min_w = min(src_weight.shape[3], dst_weight.shape[3])
+                        model_state[dst_key][:min_out, :min_in, :min_h, :min_w].copy_(
+                            src_weight[:min_out, :min_in, :min_h, :min_w]
+                        )
+                        loaded_keys.append(dst_key)
+                        print(f"   - {src_key} -> {dst_key}: 부분 매핑")
+                    except (IndexError, RuntimeError) as e:
+                        print(f"   - {src_key} -> {dst_key}: 매핑 실패 ({e})")
+                        continue
+        
+        print(f"✅ 적응적 백본 가중치 매핑 완료: {len(loaded_keys)}개")
         return loaded_keys
     
-    def _map_head_weights(self, state_dict: Dict[str, torch.Tensor], 
-                         model_state: Dict[str, torch.Tensor]) -> List[str]:
-        """헤드 가중치 매핑 (SimCC 레이어)"""
-        print("🔄 헤드 가중치 매핑...")
+    def _map_neck_weights_adaptive(self, state_dict: Dict[str, torch.Tensor],
+                                  model_state: Dict[str, torch.Tensor]) -> List[str]:
+        """적응적 넥 가중치 매핑"""
+        print("🔄 적응적 넥 가중치 매핑...")
         loaded_keys = []
         
-        # SimCC 분류기 가중치 매핑
-        if 'head.cls_x.weight' in state_dict:
-            src_weight = state_dict['head.cls_x.weight']
-            if 'head.cls_x.weight' in model_state:
-                dst_weight = model_state['head.cls_x.weight']
+        # 넥의 일부 레이어 매핑 시도
+        neck_keys = [k for k in state_dict.keys() if 'neck' in k and 'weight' in k]
+        if neck_keys:
+            # 첫 번째 넥 레이어를 우리 넥의 첫 번째 레이어에 매핑
+            src_key = neck_keys[0]
+            dst_key = 'neck.0.weight'
+            
+            if dst_key in model_state:
+                src_weight = state_dict[src_key]
+                dst_weight = model_state[dst_key]
+                
+                # 크기가 맞으면 직접 복사, 아니면 부분 복사
                 if src_weight.shape == dst_weight.shape:
-                    model_state['head.cls_x.weight'] = src_weight.clone()
-                    loaded_keys.append('head.cls_x.weight')
-                    print(f"   - cls_x: {src_weight.shape} ✅")
-                else:
-                    print(f"   - cls_x: {src_weight.shape} vs {dst_weight.shape} ❌")
+                    model_state[dst_key] = src_weight.clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key} -> {dst_key}: 완전 매핑")
+                elif len(src_weight.shape) == 4:  # 컨볼루션
+                    min_out = min(src_weight.shape[0], dst_weight.shape[0])
+                    min_in = min(src_weight.shape[1], dst_weight.shape[1])
+                    model_state[dst_key][:min_out, :min_in] = src_weight[:min_out, :min_in].clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key} -> {dst_key}: 부분 매핑")
         
-        if 'head.cls_y.weight' in state_dict:
-            src_weight = state_dict['head.cls_y.weight']
-            if 'head.cls_y.weight' in model_state:
-                dst_weight = model_state['head.cls_y.weight']
+        print(f"✅ 적응적 넥 가중치 매핑 완료: {len(loaded_keys)}개")
+        return loaded_keys
+    
+    def _map_head_weights_adaptive(self, state_dict: Dict[str, torch.Tensor],
+                                  model_state: Dict[str, torch.Tensor]) -> List[str]:
+        """적응적 헤드 가중치 매핑 (더 많은 레이어 포함)"""
+        print("🔄 적응적 헤드 가중치 매핑...")
+        loaded_keys = []
+        
+        # SimCC 분류기 가중치 매핑 (기존과 동일)
+        simcc_mappings = [
+            ('head.cls_x.weight', 'head.cls_x.weight'),
+            ('head.cls_y.weight', 'head.cls_y.weight'),
+        ]
+        
+        for src_key, dst_key in simcc_mappings:
+            if src_key in state_dict and dst_key in model_state:
+                src_weight = state_dict[src_key]
+                dst_weight = model_state[dst_key]
                 if src_weight.shape == dst_weight.shape:
-                    model_state['head.cls_y.weight'] = src_weight.clone()
-                    loaded_keys.append('head.cls_y.weight')
-                    print(f"   - cls_y: {src_weight.shape} ✅")
+                    model_state[dst_key] = src_weight.clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key}: {src_weight.shape} ✅")
                 else:
-                    print(f"   - cls_y: {src_weight.shape} vs {dst_weight.shape} ❌")
+                    print(f"   - {src_key}: {src_weight.shape} vs {dst_weight.shape} ❌")
         
-        print(f"✅ 헤드 가중치 매핑 완료: {len(loaded_keys)}개")
+        # MLP 가중치 매핑 시도
+        mlp_mappings = [
+            ('head.mlp.1.weight', 'head.mlp.1.weight'),
+            ('head.mlp2.1.weight', 'head.mlp2.1.weight'),
+        ]
+        
+        for src_key, dst_key in mlp_mappings:
+            if src_key in state_dict and dst_key in model_state:
+                src_weight = state_dict[src_key]
+                dst_weight = model_state[dst_key]
+                if src_weight.shape == dst_weight.shape:
+                    model_state[dst_key] = src_weight.clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key}: {src_weight.shape} ✅")
+                else:
+                    print(f"   - {src_key}: {src_weight.shape} vs {dst_weight.shape} ❌")
+        
+        # GAU 가중치 매핑 시도 
+        gau_mappings = [
+            ('head.gau.o.weight', 'head.gau.0.weight'),  # 첫 번째 linear
+            ('head.gau.uv.weight', 'head.gau.2.weight'), # 두 번째 linear (크기 맞추기 필요)
+        ]
+        
+        for src_key, dst_key in gau_mappings:
+            if src_key in state_dict and dst_key in model_state:
+                src_weight = state_dict[src_key]
+                dst_weight = model_state[dst_key]
+                
+                # 크기가 맞으면 직접 복사
+                if src_weight.shape == dst_weight.shape:
+                    model_state[dst_key] = src_weight.clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key}: {src_weight.shape} ✅")
+                # 크기가 다르면 부분 복사 시도
+                elif len(src_weight.shape) == 2:
+                    min_out = min(src_weight.shape[0], dst_weight.shape[0])
+                    min_in = min(src_weight.shape[1], dst_weight.shape[1])
+                    model_state[dst_key][:min_out, :min_in] = src_weight[:min_out, :min_in].clone()
+                    loaded_keys.append(dst_key)
+                    print(f"   - {src_key}: {src_weight.shape} -> {dst_weight.shape} (부분)")
+                else:
+                    print(f"   - {src_key}: {src_weight.shape} vs {dst_weight.shape} ❌")
+        
+        print(f"✅ 적응적 헤드 가중치 매핑 완료: {len(loaded_keys)}개")
         return loaded_keys
     
     def _analyze_head_dimensions(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, int]:
@@ -214,8 +354,12 @@ class RTMWXEstimator:
         simcc_x_total_dim = 576  # W * 2.0 = 288 * 2
         simcc_y_total_dim = 768  # H * 2.0 = 384 * 2
         
+        # SimCC 차원 확인 (올바른 W×H 기준)
+        simcc_x_total_dim = 576  # W * 2.0 = 288 * 2 
+        simcc_y_total_dim = 768  # H * 2.0 = 384 * 2
+        
         print(f"🎯 실제 RTMW 구조 생성:")
-        print(f"   - 입력 크기: {self.input_size}")
+        print(f"   - 입력 크기: {self.input_size} (W×H)")
         print(f"   - Feature map 크기: {self.input_width//32}x{self.input_height//32}")
         print(f"   - SimCC X 차원: {simcc_x_total_dim}")
         print(f"   - SimCC Y 차원: {simcc_y_total_dim}")
