@@ -246,7 +246,7 @@ class YOLO11LXPUHybridInferencer:
                         
                         person_boxes.extend(sorted_boxes.tolist())
             
-            print(f"🔍 YOLO11L 검출 결과: {len(person_boxes)}명, {detection_time:.3f}초")
+            # print(f"🔍 YOLO11L 검출 결과: {len(person_boxes)}명, {detection_time:.3f}초")
             
             return person_boxes if person_boxes else self._simple_person_detection(image)
             
