@@ -128,19 +128,48 @@ class StreamlinedVideoProcessor:
         models_dir = Path(__file__).parent / "models"
         models_dir.mkdir(exist_ok=True)
         
-        # 다운로드 URL (실제 URL로 변경 필요)
+        # 다운로드 URL 매핑 (올바른 URL 사용)
         model_filename = Path(model_path).name
-        download_url = f"https://download.openmmlab.com/mmpose/v1/wholebody_2d_keypoint/rtmpose/cocktail14/{model_filename}"
+        model_urls = {
+            "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth": 
+                "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
+            "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth":
+                "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
+        }
+        
+        download_url = model_urls.get(model_filename)
+        if not download_url:
+            self.logger.error(f"❌ 알 수 없는 모델 파일: {model_filename}")
+            return model_path
         
         try:
             self.logger.info(f"🔄 다운로드 중: {download_url}")
-            urllib.request.urlretrieve(download_url, full_path)
-            self.logger.info(f"✅ 다운로드 완료: {full_path}")
-            return str(full_path)
+            
+            # 진행률 표시가 있는 다운로드
+            def download_progress_hook(block_num, block_size, total_size):
+                if total_size > 0:
+                    percent = min(100, (block_num * block_size * 100) // total_size)
+                    if block_num % 100 == 0:  # 100블록마다 출력
+                        self.logger.info(f"   다운로드 진행률: {percent}%")
+            
+            urllib.request.urlretrieve(download_url, full_path, download_progress_hook)
+            
+            # 파일 크기 검증
+            if full_path.exists() and full_path.stat().st_size > 1024 * 1024:  # 1MB 이상
+                self.logger.info(f"✅ 다운로드 완료: {full_path}")
+                self.logger.info(f"   파일 크기: {full_path.stat().st_size / (1024*1024):.1f} MB")
+                return str(full_path)
+            else:
+                self.logger.error(f"❌ 다운로드된 파일이 유효하지 않음: {full_path}")
+                if full_path.exists():
+                    full_path.unlink()  # 손상된 파일 삭제
+                return model_path
             
         except Exception as e:
             self.logger.error(f"❌ 모델 다운로드 실패: {e}")
             self.logger.warning(f"⚠️ 기존 경로로 시도: {model_path}")
+            if full_path.exists():
+                full_path.unlink()  # 부분 다운로드 파일 삭제
             return model_path
 
     def _crop_person_image_rtmw(self, image: np.ndarray, bbox: List[float]) -> Optional[np.ndarray]:
