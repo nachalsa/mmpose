@@ -135,7 +135,7 @@ class HDF5PoseVisualizer:
                     metadata_json = metadata_json.decode('utf-8')
                 metadata = json.loads(metadata_json)
                 
-                # 포즈 데이터 - 무조건 스케일링된 데이터만 사용하고 8로 나누기
+                # 포즈 데이터 (스케일링된 데이터만 사용하고 8로 나누기)
                 keypoints_scaled = f_poses[f"{video_id}/keypoints_scaled"][:]
                 scores = f_poses[f"{video_id}/scores"][:]
                 
@@ -144,7 +144,7 @@ class HDF5PoseVisualizer:
                 
                 return {
                     'frames': frames,
-                    'keypoints': keypoints,  # 8로 나눈 좌표 (0-36, 0-48 범위)
+                    'keypoints': keypoints,  # 8로 나눈 좌표
                     'scores': scores,
                     'metadata': metadata
                 }
@@ -172,8 +172,8 @@ class HDF5PoseVisualizer:
         img = image.copy()
         h, w = img.shape[:2]
         
-        # 키포인트는 이미 8로 나누어진 상태로 전달됨 (0-36, 0-48 범위)
-        # 288x384 이미지에 맞게 그리기 위해 추가 스케일링 불필요
+        # 키포인트는 이미 8로 나누어진 상태로 전달됨 (0-288, 0-384 범위)
+        # 추가 스케일링 불필요
         
         # 1. 스켈레톤 연결선 그리기
         if use_skeleton:
@@ -391,9 +391,9 @@ class HDF5PoseVisualizer:
 def main():
     """메인 실행 함수"""
     parser = argparse.ArgumentParser(description="HDF5 포즈 데이터 시각화")
-    parser.add_argument("--frames", type=str, default="../../sign_language_dataset/hdf5_batches/batch_99_F_frames.h5",
+    parser.add_argument("--frames", type=str, default="sign_language_dataset/hdf5_batches/batch_99_F_frames.h5",
                        help="프레임 HDF5 파일 경로")
-    parser.add_argument("--poses", type=str, default="../../sign_language_dataset/hdf5_batches/batch_99_F_poses.h5",
+    parser.add_argument("--poses", type=str, default="sign_language_dataset/hdf5_batches/batch_99_F_poses.h5",
                        help="포즈 HDF5 파일 경로")
     parser.add_argument("--output", type=str, default="pose_visualization",
                        help="출력 디렉토리")

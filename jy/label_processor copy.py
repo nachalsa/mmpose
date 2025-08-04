@@ -267,8 +267,8 @@ class SignLanguageLabelProcessor:
 def main():
     """메인 실행 함수"""
     # 데이터 경로 설정
-    data_root = "data/1.Training"
-    output_dir = "processed_labels"
+    data_root = "/home/ty/rtmw/02/mmpose/jy/data/1.Training"
+    output_dir = "/home/ty/rtmw/02/mmpose/jy/processed_labels"
     
     # 처리기 초기화
     processor = SignLanguageLabelProcessor(data_root)

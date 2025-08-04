@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Tuple
 import logging
 from tqdm import tqdm
 import time
+import shutil
+import urllib.request
 
 # MMPose 관련 임포트
 from yolo11l_xpu_hybrid_inferencer import YOLO11LXPUHybridInferencer
@@ -95,7 +97,9 @@ class StreamlinedVideoProcessor:
         # 상대 경로를 절대 경로로 변환
         base_dir = Path(__file__).parent.parent  # mmpose/jy/.. -> mmpose
         rtmw_config_path = str(base_dir / rtmw_config_path)
-        rtmw_checkpoint_path = str(Path(__file__).parent / rtmw_checkpoint_path)  # jy/models/...
+        
+        # 모델 파일 확인 및 다운로드
+        rtmw_checkpoint_path = self._ensure_model_file(rtmw_checkpoint_path)
         
         # YOLO11L + RTMW 하이브리드 추론기 초기화
         self.inferencer = YOLO11LXPUHybridInferencer(
@@ -107,6 +111,37 @@ class StreamlinedVideoProcessor:
         )
         
         self.logger.info("✅ 스트림라인 비디오 처리기 초기화 완료")
+
+    def _ensure_model_file(self, model_path: str) -> str:
+        """모델 파일 확인 및 다운로드"""
+        # 상대 경로를 절대 경로로 변환
+        full_path = Path(__file__).parent / model_path
+        
+        if full_path.exists():
+            self.logger.info(f"✅ 기존 모델 발견: {full_path}")
+            return str(full_path)
+        
+        # 모델 파일이 없으면 다운로드
+        self.logger.info(f"📥 모델 파일 다운로드 시작: {model_path}")
+        
+        # models 디렉토리 생성
+        models_dir = Path(__file__).parent / "models"
+        models_dir.mkdir(exist_ok=True)
+        
+        # 다운로드 URL (실제 URL로 변경 필요)
+        model_filename = Path(model_path).name
+        download_url = f"https://download.openmmlab.com/mmpose/v1/wholebody_2d_keypoint/rtmpose/cocktail14/{model_filename}"
+        
+        try:
+            self.logger.info(f"🔄 다운로드 중: {download_url}")
+            urllib.request.urlretrieve(download_url, full_path)
+            self.logger.info(f"✅ 다운로드 완료: {full_path}")
+            return str(full_path)
+            
+        except Exception as e:
+            self.logger.error(f"❌ 모델 다운로드 실패: {e}")
+            self.logger.warning(f"⚠️ 기존 경로로 시도: {model_path}")
+            return model_path
 
     def _crop_person_image_rtmw(self, image: np.ndarray, bbox: List[float]) -> Optional[np.ndarray]:
         """RTMW 방식으로 사람 이미지 크롭"""
@@ -180,23 +215,26 @@ class StreamlinedVideoProcessor:
                 if not ret:
                     break
                 
-                # 1. YOLO + RTMW 하이브리드 처리
+                # 1. YOLO 검출로 사람 찾기
                 try:
                     vis_image, results = self.inferencer.process_frame(frame)
                     if not results or len(results) == 0:
                         frame_idx += 1
                         continue
                     
-                    # 첫 번째 사람 선택
-                    keypoints, scores, bbox = results[0]
+                    # 첫 번째 사람의 bbox만 사용
+                    _, _, bbox = results[0]
                     
-                    # 2. RTMW 방식으로 크롭 이미지 생성 (VideoProcessorYOLO11L 방식 사용)
+                    # 2. RTMW 방식으로 크롭 이미지 생성
                     crop_image = self._crop_person_image_rtmw(frame, bbox)
                     if crop_image is None:
                         frame_idx += 1
                         continue
                     
-                    # 3. 배열에 추가
+                    # 3. 크롭된 이미지에서 직접 포즈 추정 (288x384 좌표계)
+                    keypoints, scores = self.inferencer.estimate_pose_on_crop(crop_image)
+                    
+                    # 4. 배열에 추가
                     all_crop_images.append(crop_image)
                     all_keypoints.append(keypoints)
                     all_scores.append(scores)
