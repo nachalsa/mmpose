@@ -387,9 +387,10 @@ class VideoProcessorYOLO11L:
             pose_array = np.column_stack([keypoints, scores.reshape(-1, 1)])  # (133, 3) - [x, y, score]
             np.save(pose_npy_path, pose_array)
             
-            # 시각화용 JPEG 저장
-            vis_path = self.output_dir / "combined_data" / f"{base_filename}_visualization.jpg"
-            self._save_pose_visualization(crop_image, keypoints, scores, vis_path)
+            # 시각화용 JPEG 저장 (메소드가 존재하는 경우에만)
+            if hasattr(self, '_save_pose_visualization'):
+                vis_path = self.output_dir / "combined_data" / f"{base_filename}_visualization.jpg"
+                self._save_pose_visualization(crop_image, keypoints, scores, vis_path)
             
             # 통합 크롭 이미지도 JPEG로 저장
             crop_img_path = self.output_dir / "combined_data" / f"{base_filename}_crop.jpg"
