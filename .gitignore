@@ -138,3 +138,6 @@ models
 video_processing_outputs
 
 data
+processed_labels
+pose_visualization
+sign_language_dataset

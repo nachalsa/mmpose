@@ -17,7 +17,8 @@ import time
 import shutil
 import urllib.request
 
-# MMPose 관련 임포트
+# 설정 및 MMPose 관련 임포트
+from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
 from yolo11l_xpu_hybrid_inferencer import YOLO11LXPUHybridInferencer
 
 # RTMW 전처리 함수들 (video_processor_yolo11l.py에서 가져옴)
@@ -89,7 +90,7 @@ class StreamlinedVideoProcessor:
     
     def __init__(self, 
                  rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
-                 rtmw_checkpoint_path: str = "models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"):
+                 rtmw_model_name: str = "rtmw-x"):  # 모델명으로 선택
         
         self.logger = logging.getLogger(__name__)
         self.keypoint_scale = 8  # 키포인트 x,y 좌표 8배 스케일링
@@ -98,13 +99,14 @@ class StreamlinedVideoProcessor:
         base_dir = Path(__file__).parent.parent  # mmpose/jy/.. -> mmpose
         rtmw_config_path = str(base_dir / rtmw_config_path)
         
-        # 모델 파일 확인 및 다운로드
-        rtmw_checkpoint_path = self._ensure_model_file(rtmw_checkpoint_path)
+        # 모델 파일들 확인 및 다운로드
+        yolo_model_path = self._ensure_yolo_model()
+        rtmw_model_path = self._ensure_rtmw_model(rtmw_model_name)
         
         # YOLO11L + RTMW 하이브리드 추론기 초기화
         self.inferencer = YOLO11LXPUHybridInferencer(
             rtmw_config=rtmw_config_path,
-            rtmw_checkpoint=rtmw_checkpoint_path,
+            rtmw_checkpoint=rtmw_model_path,
             detection_device='xpu',
             pose_device='xpu',
             optimize_for_accuracy=True
@@ -112,65 +114,116 @@ class StreamlinedVideoProcessor:
         
         self.logger.info("✅ 스트림라인 비디오 처리기 초기화 완료")
 
-    def _ensure_model_file(self, model_path: str) -> str:
-        """모델 파일 확인 및 다운로드"""
-        # 상대 경로를 절대 경로로 변환
-        full_path = Path(__file__).parent / model_path
+    def _ensure_yolo_model(self) -> str:
+        """YOLO 모델 파일 확인 및 다운로드"""
+        yolo_config = YOLO_MODEL_CONFIG
+        model_path = Path(MODELS_DIR) / yolo_config["filename"]
         
-        if full_path.exists():
-            self.logger.info(f"✅ 기존 모델 발견: {full_path}")
-            return str(full_path)
+        if model_path.exists():
+            self.logger.info(f"✅ 기존 YOLO 모델 발견: {model_path}")
+            return str(model_path)
         
-        # 모델 파일이 없으면 다운로드
-        self.logger.info(f"📥 모델 파일 다운로드 시작: {model_path}")
+        self.logger.info(f"📥 YOLO 모델 다운로드 시작: {yolo_config['filename']}")
         
         # models 디렉토리 생성
-        models_dir = Path(__file__).parent / "models"
-        models_dir.mkdir(exist_ok=True)
-        
-        # 다운로드 URL 매핑 (올바른 URL 사용)
-        model_filename = Path(model_path).name
-        model_urls = {
-            "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth": 
-                "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
-            "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth":
-                "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
-        }
-        
-        download_url = model_urls.get(model_filename)
-        if not download_url:
-            self.logger.error(f"❌ 알 수 없는 모델 파일: {model_filename}")
-            return model_path
+        Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
         
         try:
+            # YOLO 모델은 ultralytics에서 자동 다운로드되므로 
+            # 일시적으로 해당 경로에서 다운로드 후 models로 복사
+            from ultralytics import YOLO
+            
+            # 임시로 YOLO 모델 로드 (자동 다운로드됨)
+            temp_model = YOLO(yolo_config["filename"])
+            
+            # ultralytics 캐시에서 모델 파일 찾기
+            import torch
+            from ultralytics.utils import ASSETS
+            
+            # 다운로드된 모델 찾기
+            cache_dir = Path.home() / '.cache' / 'ultralytics'
+            downloaded_model = None
+            
+            for weights_dir in [cache_dir, cache_dir / 'weights']:
+                if weights_dir.exists():
+                    for model_file in weights_dir.glob(yolo_config["filename"]):
+                        downloaded_model = model_file
+                        break
+                if downloaded_model:
+                    break
+            
+            if downloaded_model and downloaded_model.exists():
+                # models 디렉토리로 복사
+                shutil.copy2(downloaded_model, model_path)
+                self.logger.info(f"✅ YOLO 모델 복사 완료: {model_path}")
+                self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
+                return str(model_path)
+            else:
+                self.logger.warning(f"⚠️ YOLO 모델 다운로드 위치를 찾을 수 없음")
+                return yolo_config["filename"]  # ultralytics가 자동으로 처리하도록
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ YOLO 모델 다운로드 실패: {e}")
+            self.logger.info("   ultralytics가 자동으로 다운로드할 예정")
+            return yolo_config["filename"]
+
+    def _ensure_rtmw_model(self, model_name: str = "rtmw-x") -> str:
+        """RTMW 모델 파일 확인 및 다운로드"""
+        # 모델명으로 설정 찾기
+        rtmw_config = None
+        for config in RTMW_MODEL_OPTIONS:
+            if model_name in config["filename"]:
+                rtmw_config = config
+                break
+        
+        if not rtmw_config:
+            self.logger.error(f"❌ 알 수 없는 RTMW 모델명: {model_name}")
+            rtmw_config = RTMW_MODEL_OPTIONS[0]  # 기본값 사용
+        
+        model_path = Path(rtmw_config["path"])
+        
+        if model_path.exists():
+            self.logger.info(f"✅ 기존 RTMW 모델 발견: {model_path}")
+            return str(model_path)
+        
+        self.logger.info(f"📥 RTMW 모델 다운로드 시작: {rtmw_config['filename']}")
+        
+        # models 디렉토리 생성
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            download_url = rtmw_config["url"]
+            if not download_url:
+                self.logger.error(f"❌ 다운로드 URL이 없음: {rtmw_config['filename']}")
+                return str(model_path)
+            
             self.logger.info(f"🔄 다운로드 중: {download_url}")
             
             # 진행률 표시가 있는 다운로드
             def download_progress_hook(block_num, block_size, total_size):
                 if total_size > 0:
                     percent = min(100, (block_num * block_size * 100) // total_size)
-                    if block_num % 100 == 0:  # 100블록마다 출력
+                    if block_num % 50 == 0:  # 50블록마다 출력 (더 자주)
                         self.logger.info(f"   다운로드 진행률: {percent}%")
             
-            urllib.request.urlretrieve(download_url, full_path, download_progress_hook)
+            urllib.request.urlretrieve(download_url, model_path, download_progress_hook)
             
             # 파일 크기 검증
-            if full_path.exists() and full_path.stat().st_size > 1024 * 1024:  # 1MB 이상
-                self.logger.info(f"✅ 다운로드 완료: {full_path}")
-                self.logger.info(f"   파일 크기: {full_path.stat().st_size / (1024*1024):.1f} MB")
-                return str(full_path)
+            if model_path.exists() and model_path.stat().st_size > 1024 * 1024:  # 1MB 이상
+                self.logger.info(f"✅ RTMW 모델 다운로드 완료: {model_path}")
+                self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
+                return str(model_path)
             else:
-                self.logger.error(f"❌ 다운로드된 파일이 유효하지 않음: {full_path}")
-                if full_path.exists():
-                    full_path.unlink()  # 손상된 파일 삭제
-                return model_path
+                self.logger.error(f"❌ 다운로드된 파일이 유효하지 않음: {model_path}")
+                if model_path.exists():
+                    model_path.unlink()  # 손상된 파일 삭제
+                return str(model_path)
             
         except Exception as e:
-            self.logger.error(f"❌ 모델 다운로드 실패: {e}")
-            self.logger.warning(f"⚠️ 기존 경로로 시도: {model_path}")
-            if full_path.exists():
-                full_path.unlink()  # 부분 다운로드 파일 삭제
-            return model_path
+            self.logger.error(f"❌ RTMW 모델 다운로드 실패: {e}")
+            if model_path.exists():
+                model_path.unlink()  # 부분 다운로드 파일 삭제
+            return str(model_path)
 
     def _crop_person_image_rtmw(self, image: np.ndarray, bbox: List[float]) -> Optional[np.ndarray]:
         """RTMW 방식으로 사람 이미지 크롭"""
@@ -363,11 +416,13 @@ class BatchProcessor:
     def __init__(self, 
                  data_root: str = "data/1.Training",  # 상대 경로로 변경
                  output_dir: str = "sign_language_dataset",
-                 batch_size: int = 250):
+                 batch_size: int = 250,
+                 rtmw_model_name: str = "rtmw-x"):  # RTMW 모델 선택 옵션 추가
         
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.batch_size = batch_size
+        self.rtmw_model_name = rtmw_model_name
         
         # 로깅 설정
         logging.basicConfig(
@@ -387,8 +442,10 @@ class BatchProcessor:
         self.sen_output_dir.mkdir(parents=True, exist_ok=True)
         self.hdf5_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 스트림라인 처리기 초기화
-        self.processor = StreamlinedVideoProcessor()
+        # 스트림라인 처리기 초기화 (모델 자동 다운로드 포함)
+        self.logger.info(f"🚀 모델 초기화 시작 (RTMW: {rtmw_model_name})")
+        self.processor = StreamlinedVideoProcessor(rtmw_model_name=rtmw_model_name)
+        self.logger.info("✅ 배치 처리기 초기화 완료")
 
     def collect_f_videos(self) -> List[Tuple[int, str]]:
         """F 방향 영상 수집 (라벨 무관)"""
@@ -581,8 +638,30 @@ def main():
     print("🚀 스트림라인 배치 처리기")
     print("=" * 50)
     
-    # 배치 처리기 초기화
-    batch_processor = BatchProcessor()
+    # RTMW 모델 선택
+    print("\n사용할 RTMW 모델을 선택하세요:")
+    print("1. RTMW-x (최고 성능, 기본값)")
+    print("2. RTMW-l (균형)")
+    
+    model_choice = input("모델 선택 (1-2, 기본값: 1): ").strip()
+    
+    rtmw_model_map = {
+        '1': 'rtmw-x',
+        '2': 'rtmw-dw-x-l',
+        '': 'rtmw-x'  # 기본값
+    }
+    
+    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-x')
+    print(f"✅ 선택된 모델: {rtmw_model_name}")
+    
+    # 배치 처리기 초기화 (모델 자동 다운로드 포함)
+    print("\n📥 모델 다운로드 및 초기화 중...")
+    try:
+        batch_processor = BatchProcessor(rtmw_model_name=rtmw_model_name)
+        print("✅ 초기화 완료!")
+    except Exception as e:
+        print(f"❌ 초기화 실패: {e}")
+        return
     
     while True:
         print("\n처리 모드를 선택하세요:")
@@ -590,9 +669,10 @@ def main():
         print("2. 전체 배치 처리 (250개씩)")
         print("3. 전체 배치 처리 + 중간파일 정리")
         print("4. 영상 목록만 확인")
+        print("5. 모델 정보 확인")
         print("0. 종료")
         
-        choice = input("선택 (0-4): ").strip()
+        choice = input("선택 (0-5): ").strip()
         
         if choice == '1':
             batch_processor.process_test_batch(5)
@@ -607,6 +687,24 @@ def main():
                 print(f"  {i+1}. SEN{sen_id:04d} - {Path(video_path).name}")
             if len(video_data) > 10:
                 print(f"  ... 외 {len(video_data) - 10}개")
+        elif choice == '5':
+            print(f"\n📋 현재 모델 정보:")
+            print(f"  - RTMW 모델: {rtmw_model_name}")
+            print(f"  - YOLO 모델: {YOLO_MODEL_CONFIG['filename']}")
+            print(f"  - 모델 디렉토리: {MODELS_DIR}")
+            
+            # 모델 파일 존재 확인
+            yolo_path = Path(MODELS_DIR) / YOLO_MODEL_CONFIG["filename"]
+            print(f"  - YOLO 파일 존재: {'✅' if yolo_path.exists() else '❌'}")
+            
+            for config in RTMW_MODEL_OPTIONS:
+                if rtmw_model_name in config["filename"]:
+                    rtmw_path = Path(config["path"])
+                    print(f"  - RTMW 파일 존재: {'✅' if rtmw_path.exists() else '❌'}")
+                    if rtmw_path.exists():
+                        size_mb = rtmw_path.stat().st_size / (1024*1024)
+                        print(f"    크기: {size_mb:.1f} MB")
+                    break
         elif choice == '0':
             print("👋 종료합니다.")
             break
