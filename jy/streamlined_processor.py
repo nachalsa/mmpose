@@ -22,8 +22,8 @@ from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
 from yolo11l_xpu_hybrid_inferencer import YOLO11LXPUHybridInferencer
 
 # RTMW 전처리 함수들 (video_processor_yolo11l.py에서 가져옴)
-def bbox_xyxy2cs(bbox: np.ndarray, padding: float = 1.25) -> Tuple[np.ndarray, np.ndarray]:
-    """바운딩박스를 center, scale로 변환"""
+def bbox_xyxy2cs(bbox: np.ndarray, padding: float = 1.10) -> Tuple[np.ndarray, np.ndarray]:
+    """바운딩박스를 center, scale로 변환 (패딩 1.10으로 수정)"""
     dim = bbox.ndim
     if dim == 1:
         bbox = bbox[None, :]
@@ -96,7 +96,11 @@ class StreamlinedVideoProcessor:
         self.keypoint_scale = 8  # 키포인트 x,y 좌표 8배 스케일링
         
         # 상대 경로를 절대 경로로 변환
-        base_dir = Path(__file__).parent.parent  # mmpose/jy/.. -> mmpose
+        # __file__이 정의되지 않은 환경(예: Jupyter)을 위한 예외 처리
+        try:
+            base_dir = Path(__file__).parent.parent
+        except NameError:
+            base_dir = Path.cwd().parent
         rtmw_config_path = str(base_dir / rtmw_config_path)
         
         # 모델 파일들 확인 및 다운로드
@@ -231,9 +235,9 @@ class StreamlinedVideoProcessor:
             # RTMW 설정: width=288, height=384
             input_width, input_height = 288, 384
             
-            # 1. bbox를 center, scale로 변환 (padding=1.25 적용)
+            # 1. bbox를 center, scale로 변환 (padding= bbox_xyxy2cs에 정의된 값으로 적용)
             bbox_array = np.array(bbox, dtype=np.float32)
-            center, scale = bbox_xyxy2cs(bbox_array, padding=1.25)
+            center, scale = bbox_xyxy2cs(bbox_array)
             
             # 2. aspect ratio 고정 (width/height = 288/384 = 0.75)
             aspect_ratio = input_width / input_height  # 0.75
@@ -287,10 +291,7 @@ class StreamlinedVideoProcessor:
                 self.logger.error(f"❌ 비디오 열기 실패: {video_path}")
                 return None
             
-            all_crop_images = []
-            all_keypoints = []
-            all_scores = []
-            
+            all_crop_images, all_keypoints, all_scores = [], [], []
             frame_idx = 0
             while True:
                 ret, frame = cap.read()
@@ -330,7 +331,7 @@ class StreamlinedVideoProcessor:
             
             cap.release()
             
-            if len(all_crop_images) == 0:
+            if not all_crop_images:
                 self.logger.warning(f"⚠️ 유효한 프레임이 없습니다: {video_path}")
                 return None
             
@@ -345,7 +346,7 @@ class StreamlinedVideoProcessor:
             self.logger.error(f"❌ 비디오 처리 실패: {video_path}, 오류: {e}")
             return None
 
-    def process_sen_video(self, sen_id: int, video_path: str, output_dir: Path) -> bool:
+    def process_sen_video(self, sen_id: int, video_path: str, output_dir: Path) -> Tuple[bool, Optional[np.ndarray]]:
         """
         SEN ID 기반으로 비디오 처리하고 저장
         
@@ -373,16 +374,16 @@ class StreamlinedVideoProcessor:
             sen_dir.mkdir(parents=True, exist_ok=True)
             
             # 넘파이 배열 저장 (키포인트는 8배 스케일링)
-            np.save(sen_dir / "crop_images.npy", arrays['crop_images'])
+            # crop_images는 바로 사용 후 삭제될 것이므로 저장하지 않음
             
             # 키포인트 8배 스케일링하여 정수로 저장
             keypoints_scaled = np.round(arrays['keypoints'] * self.keypoint_scale).astype(np.int32)
             np.save(sen_dir / "keypoints_scaled.npy", keypoints_scaled)
-            np.save(sen_dir / "keypoints_original.npy", arrays['keypoints'])  # 원본도 보존
-            
             np.save(sen_dir / "scores.npy", arrays['scores'])
             
-            # 최소한의 메타데이터
+            # JPEG 저장을 위해 crop_images는 메모리에 유지
+            # 임시 파일 대신 딕셔너리로 반환하여 create_hdf5_batch에 전달
+            
             metadata = {
                 'sen_id': sen_id,
                 'video_path': str(video_path),
@@ -391,7 +392,6 @@ class StreamlinedVideoProcessor:
                 'processing_time': processing_time,
                 'shape_info': {
                     'crop_images': list(arrays['crop_images'].shape),
-                    'keypoints_original': list(arrays['keypoints'].shape),
                     'keypoints_scaled': list(keypoints_scaled.shape),
                     'scores': list(arrays['scores'].shape)
                 },
@@ -403,11 +403,12 @@ class StreamlinedVideoProcessor:
                 json.dump(metadata, f, indent=2)
             
             self.logger.info(f"✅ SEN{sen_id:04d} 완료: {arrays['frame_count']}프레임, {processing_time:.2f}초")
-            return True
-            
+            # crop_images를 반환하여 HDF5 생성 시 사용
+            return True, arrays['crop_images']
+
         except Exception as e:
             self.logger.error(f"❌ SEN{sen_id:04d} 처리 실패: {e}")
-            return False
+            return False, None
 
 
 class BatchProcessor:
@@ -507,81 +508,49 @@ class BatchProcessor:
         
         return folder_video_data
 
-    def collect_f_videos(self) -> List[Tuple[int, str]]:
-        """기존 API 호환성을 위한 래퍼 함수 (F 방향 고정)"""
-        self.logger.warning("⚠️ collect_f_videos()는 deprecated입니다. collect_videos_by_folder()를 사용하세요.")
-        
-        # 임시로 방향을 F로 설정하고 데이터 수집
-        original_direction = self.direction
-        self.direction = "F"
-        
-        folder_data = self.collect_videos_by_folder()
-        
-        # 원래 방향으로 복원
-        self.direction = original_direction
-        
-        # 모든 폴더의 데이터를 하나의 리스트로 합치고 SEN ID로 정렬
-        all_videos = []
-        for folder_videos in folder_data.values():
-            all_videos.extend(folder_videos)
-        
-        all_videos.sort(key=lambda x: x[0])
-        return all_videos
 
     def create_batches_by_folder(self, folder_video_data: Dict[str, List[Tuple[int, str]]]) -> List[Dict]:
         """폴더별로 배치 생성"""
         all_batches = []
         batch_counter = 0
-        
         for folder_name, video_data in folder_video_data.items():
-            self.logger.info(f"📦 {folder_name} 폴더 배치 생성 중...")
-            
-            # 폴더 내 영상을 배치 크기로 분할
-            folder_batches = []
             for i in range(0, len(video_data), self.batch_size):
                 batch_data = video_data[i:i + self.batch_size]
-                
                 batch_info = {
-                    'batch_id': batch_counter,
-                    'folder_name': folder_name,
-                    'folder_batch_idx': len(folder_batches),  # 폴더 내 배치 인덱스
+                    'batch_id': batch_counter, 'folder_name': folder_name,
+                    'folder_batch_idx': i // self.batch_size,
                     'data': batch_data,
-                    'sen_range': (batch_data[0][0], batch_data[-1][0])  # SEN ID 범위
+                    'sen_range': (batch_data[0][0], batch_data[-1][0])
                 }
-                
-                folder_batches.append(batch_info)
                 all_batches.append(batch_info)
                 batch_counter += 1
-            
-            self.logger.info(f"   └─ {folder_name}: {len(folder_batches)}개 배치 생성")
-            for batch in folder_batches:
-                sen_start, sen_end = batch['sen_range']
-                self.logger.info(f"      배치 {batch['batch_id']}: SEN{sen_start:04d}~SEN{sen_end:04d} ({len(batch['data'])}개)")
-        
         self.logger.info(f"📦 전체 {len(all_batches)}개 배치 생성 완료")
         return all_batches
-
-    def process_sen_batch(self, batch_info: Dict) -> List[int]:
-        """SEN 배치 처리 (비디오 → 넘파이 배열)"""
+    
+    def process_sen_batch(self, batch_info: Dict) -> Dict[int, np.ndarray]:
+        """SEN 배치 처리 (비디오 → 넘파이 배열) 및 crop_images 반환"""
         batch_id = batch_info['batch_id']
         folder_name = batch_info['folder_name']
         batch_data = batch_info['data']
-        sen_start, sen_end = batch_info['sen_range']
         
-        successful_sen_ids = []
+        successful_data = {}
         
-        self.logger.info(f"🔄 배치 {batch_id} [{folder_name}] SEN{sen_start:04d}~SEN{sen_end:04d} 처리 시작 ({len(batch_data)}개)")
+        self.logger.info(f"🔄 배치 {batch_id} [{folder_name}] 처리 시작 ({len(batch_data)}개)")
         
         for sen_id, video_path in tqdm(batch_data, desc=f"배치 {batch_id} [{folder_name}]"):
-            success = self.processor.process_sen_video(sen_id, video_path, self.sen_output_dir)
+            success, crop_images = self.processor.process_sen_video(sen_id, video_path, self.sen_output_dir)
             if success:
-                successful_sen_ids.append(sen_id)
+                successful_data[sen_id] = crop_images
         
-        self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] 처리 완료: {len(successful_sen_ids)}/{len(batch_data)}개 성공")
-        return successful_sen_ids
+        self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] 처리 완료: {len(successful_data)}/{len(batch_data)}개 성공")
+        return successful_data
 
-    def create_hdf5_batch(self, sen_ids: List[int], batch_info: Dict):
-        """SEN 배열들을 HDF5 배치로 변환"""
+    def create_hdf5_batch(self, successful_data: Dict[int, np.ndarray], batch_info: Dict):
+        """
+        SEN 배열들을 프레임과 포즈로 분리된 HDF5 배치 파일로 변환합니다.
+        - 프레임: JPEG 형식으로 압축되어 저장 (가변 길이)
+        - HDF5 데이터셋: LZF 압축 적용
+        """
         try:
             batch_id = batch_info['batch_id']
             folder_name = batch_info['folder_name']
@@ -591,108 +560,98 @@ class BatchProcessor:
             self.logger.info(f"📦 배치 {batch_id} [{folder_name}] HDF5 생성 시작")
             
             # HDF5 파일 경로 (개선된 네이밍 규칙)
-            frames_h5 = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
-            poses_h5 = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
+            frames_h5_path = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
+            poses_h5_path = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
             
-            with h5py.File(frames_h5, 'w') as f_frames, \
-                 h5py.File(poses_h5, 'w') as f_poses:
+            # JPEG 인코딩된 데이터를 위한 가변 길이 타입 정의
+            jpeg_vlen_dtype = h5py.vlen_dtype(np.uint8)
+
+            # 2. 두 개의 파일을 동시에 열기 위한 with 구문 사용
+            with h5py.File(frames_h5_path, 'w') as f_frames, \
+                 h5py.File(poses_h5_path, 'w') as f_poses:
                 
-                # 배치 메타데이터 저장
+                # 배치 메타데이터를 두 파일 모두에 저장
                 batch_metadata = {
-                    # 'batch_id': batch_id,
                     'folder_name': folder_name,
                     'folder_batch_idx': folder_batch_idx,
                     'sen_range': [sen_start, sen_end],
-                    'video_count': len(sen_ids),
+                    'video_count': len(successful_data),
                     'creation_time': str(datetime.now())
                 }
-                
                 f_frames.attrs.update(batch_metadata)
                 f_poses.attrs.update(batch_metadata)
                 
-                for sen_id in tqdm(sen_ids, desc=f"HDF5 배치 {batch_id} [{folder_name} {folder_batch_idx}]"):
+                # 처리 성공한 SEN ID 목록을 정렬하여 순서 보장
+                sen_ids = sorted(successful_data.keys())
+
+                for sen_id in tqdm(sen_ids, desc=f"HDF5 배치 {batch_id} [{folder_name}]"):
                     sen_dir = self.sen_output_dir / f"SEN{sen_id:04d}"
+                    crop_images = successful_data[sen_id]
                     
-                    # 넘파이 배열 로드
-                    crop_images = np.load(sen_dir / "crop_images.npy")
+                    # 임시 저장된 넘파이 배열 로드
                     keypoints_scaled = np.load(sen_dir / "keypoints_scaled.npy")
                     keypoints_original = np.load(sen_dir / "keypoints_original.npy")
                     scores = np.load(sen_dir / "scores.npy")
                     
-                    # 메타데이터 로드
                     with open(sen_dir / "metadata.json", 'r') as f:
                         metadata = json.load(f)
                     
-                    # HDF5에 저장
-                    video_group = f"video_{sen_id:04d}"
+                    # --- 프레임 파일(f_frames)에 데이터 저장 ---
+                    frame_group = f_frames.create_group(f"video_{sen_id:04d}")
                     
-                    # 프레임 데이터
-                    f_frames.create_dataset(f"{video_group}/frames", 
-                                          data=crop_images, 
-                                          compression='gzip', compression_opts=1)
+                    # 이미지를 JPEG 바이트 스트림으로 인코딩
+                    jpeg_frames = [cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1] for img in crop_images]
+                    
+                    # JPEG 데이터셋 생성 (가변 길이, lzf 압축)
+                    frame_group.create_dataset("frames_jpeg", 
+                                             data=jpeg_frames, 
+                                             dtype=jpeg_vlen_dtype, 
+                                             compression='lzf')
+                    
+                    # 메타데이터 저장
                     f_frames.create_dataset(f"{video_group}/metadata", 
                                           data=json.dumps(metadata))
+                    # --- 포즈 파일(f_poses)에 데이터 저장 ---
+                    pose_group = f_poses.create_group(f"video_{sen_id:04d}")
                     
-                    # 포즈 데이터 (스케일링된 정수 좌표와 원본 좌표 모두 저장)
-                    f_poses.create_dataset(f"{video_group}/keypoints_scaled", 
-                                         data=keypoints_scaled, 
-                                         compression='gzip', compression_opts=1)
-                    f_poses.create_dataset(f"{video_group}/keypoints_original", 
-                                         data=keypoints_original, 
-                                         compression='gzip', compression_opts=1)
-                    f_poses.create_dataset(f"{video_group}/scores", 
-                                         data=scores, 
-                                         compression='gzip', compression_opts=1)
+                    # 포즈 관련 데이터셋 생성 (lzf 압축)
+                    pose_group.create_dataset("keypoints_scaled", data=keypoints_scaled, compression='lzf')
+                    pose_group.create_dataset("scores", data=scores, compression='lzf')
             
-            self.logger.info(f"✅ 배치 {batch_id} [{folder_name} {folder_batch_idx}] HDF5 생성 완료")
-            self.logger.info(f"   - 프레임: {frames_h5.name}")
-            self.logger.info(f"   - 포즈: {poses_h5.name}")
+            self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] HDF5 생성 완료 (2개 파일)")
+            self.logger.info(f"   - 프레임 파일: {frames_h5_path.name}")
+            self.logger.info(f"   - 포즈 파일:   {poses_h5_path.name}")
             
         except Exception as e:
-            self.logger.error(f"❌ 배치 {batch_id} [{folder_name} {folder_batch_idx}] HDF5 생성 실패: {e}")
+            self.logger.error(f"❌ 배치 {batch_info['batch_id']} [{batch_info['folder_name']}] HDF5 생성 실패: {e}", exc_info=True)
 
     def cleanup_sen_files(self, sen_ids: List[int], batch_info: Dict):
         """SEN 중간 파일들 정리"""
         batch_id = batch_info['batch_id']
-        folder_name = batch_info['folder_name']
-        
         for sen_id in sen_ids:
             sen_dir = self.sen_output_dir / f"SEN{sen_id:04d}"
             if sen_dir.exists():
-                import shutil
                 shutil.rmtree(sen_dir)
-        
-        self.logger.info(f"🧹 배치 {batch_id} [{folder_name}] 중간 파일 {len(sen_ids)}개 정리 완료")
+        self.logger.info(f"🧹 배치 {batch_id} 중간 파일 {len(sen_ids)}개 정리 완료")
 
     def process_all_batches(self, cleanup_intermediate: bool = False):
-        """전체 배치 처리 파이프라인 (폴더별)"""
-        # 1. 폴더별 지정 방향 영상 수집
+        """전체 배치 처리 파이프라인"""
         folder_video_data = self.collect_videos_by_folder()
         if not folder_video_data:
             self.logger.error("❌ 처리할 영상이 없습니다")
             return
         
-        # 2. 폴더별 배치 생성
         all_batches = self.create_batches_by_folder(folder_video_data)
         
-        # 3. 각 배치 처리
         for batch_info in all_batches:
-            batch_id = batch_info['batch_id']
-            folder_name = batch_info['folder_name']
-            total_batches = len(all_batches)
+            self.logger.info(f"\n🚀 배치 {batch_info['batch_id'] + 1}/{len(all_batches)} [{batch_info['folder_name']}] 처리 시작")
             
-            self.logger.info(f"\n🚀 배치 {batch_id + 1}/{total_batches} [{folder_name}] 처리 시작")
+            successful_data = self.process_sen_batch(batch_info)
             
-            # 3-1. SEN 처리 (비디오 → 넘파이)
-            successful_sen_ids = self.process_sen_batch(batch_info)
-            
-            if successful_sen_ids:
-                # 3-2. HDF5 생성 (넘파이 → HDF5)
-                self.create_hdf5_batch(successful_sen_ids, batch_info)
-                
-                # 3-3. 중간 파일 정리 (선택적)
+            if successful_data:
+                self.create_hdf5_batch(successful_data, batch_info)
                 if cleanup_intermediate:
-                    self.cleanup_sen_files(successful_sen_ids, batch_info)
+                    self.cleanup_sen_files(list(successful_data.keys()), batch_info)
             
             self.logger.info(f"✅ 배치 {batch_id + 1} [{folder_name}] 완료\n")
         
@@ -756,14 +715,12 @@ class BatchProcessor:
             'sen_range': (video_data[0][0], video_data[-1][0])
         }
         
-        # SEN 처리
-        successful_sen_ids = self.process_sen_batch(batch_info)
+        successful_data = self.process_sen_batch(batch_info)
         
-        # HDF5 생성
-        if successful_sen_ids:
-            self.create_hdf5_batch(successful_sen_ids, batch_info)
-        
-        self.logger.info(f"✅ 테스트 배치 완료 [{test_folder}] ({len(successful_sen_ids)}/{len(video_data)}개 성공)")
+        if successful_data:
+            self.create_hdf5_batch(successful_data, batch_info)
+            self.logger.info("✅ 테스트 배치 HDF5 생성 완료. 중간 파일을 확인하려면 cleanup_intermediate=False로 실행하세요.")
+
 
 def main():
     """메인 실행 함수"""
