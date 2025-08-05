@@ -128,8 +128,12 @@ class HDF5PoseVisualizer:
             with h5py.File(self.frames_path, 'r') as f_frames, \
                  h5py.File(self.poses_path, 'r') as f_poses:
                 
-                # 프레임 데이터
-                frames = f_frames[f"{video_id}/frames"][:]
+                # 프레임 데이터 (JPEG 바이트 스트림)
+                jpeg_frames_bytes = f_frames[f"{video_id}/frames_jpeg"][:]
+                # 각 JPEG 바이트 스트림을 이미지로 디코딩
+                frames = [cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR) for jpeg_bytes in jpeg_frames_bytes]
+                # 리스트를 NumPy 배열로 변환
+                frames = np.array(frames)
                 metadata_json = f_frames[f"{video_id}/metadata"][()]
                 if isinstance(metadata_json, bytes):
                     metadata_json = metadata_json.decode('utf-8')
@@ -188,9 +192,9 @@ class HDF5PoseVisualizer:
                 if scores[pt1_idx] < confidence_threshold or scores[pt2_idx] < confidence_threshold:
                     continue
                 
-                pt1 = (int(keypoints[pt1_idx][0]), int(keypoints[pt1_idx][1]))
-                pt2 = (int(keypoints[pt2_idx][0]), int(keypoints[pt2_idx][1]))
-                
+                pt1 = (int(keypoints[pt1_idx, 0]), int(keypoints[pt1_idx, 1]))
+                pt2 = (int(keypoints[pt2_idx, 0]), int(keypoints[pt2_idx, 1]))
+
                 # 좌표 유효성 체크
                 if (0 <= pt1[0] < w and 0 <= pt1[1] < h and 
                     0 <= pt2[0] < w and 0 <= pt2[1] < h):
@@ -211,7 +215,7 @@ class HDF5PoseVisualizer:
                 cv2.circle(img, (x, y), 2, color, -1)
                 
                 # 높은 신뢰도는 테두리 추가
-                if score > 0.8:
+                if score > 8.0:
                     cv2.circle(img, (x, y), 3, (255, 255, 255), 1)
         
         return img
