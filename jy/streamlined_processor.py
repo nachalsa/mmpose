@@ -591,7 +591,6 @@ class BatchProcessor:
                     
                     # 임시 저장된 넘파이 배열 로드
                     keypoints_scaled = np.load(sen_dir / "keypoints_scaled.npy")
-                    keypoints_original = np.load(sen_dir / "keypoints_original.npy")
                     scores = np.load(sen_dir / "scores.npy")
                     
                     with open(sen_dir / "metadata.json", 'r') as f:
