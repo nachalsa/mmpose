@@ -561,8 +561,8 @@ class BatchProcessor:
             self.logger.info(f"📦 배치 {batch_id} [{folder_name}] HDF5 생성 시작")
             
             # HDF5 파일 경로 (개선된 네이밍 규칙)
-            frames_h5_path = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
-            poses_h5_path = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
+            frames_h5_path = self.hdf5_output_dir / f"batch_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
+            poses_h5_path = self.hdf5_output_dir / f"batch_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
             
             # JPEG 인코딩된 데이터를 위한 가변 길이 타입 정의
             jpeg_vlen_dtype = h5py.vlen_dtype(np.uint8)
@@ -596,6 +596,7 @@ class BatchProcessor:
                     with open(sen_dir / "metadata.json", 'r') as f:
                         metadata = json.load(f)
                     
+                    video_group = f"video_{sen_id:04d}"
                     # --- 프레임 파일(f_frames)에 데이터 저장 ---
                     frame_group = f_frames.create_group(f"video_{sen_id:04d}")
                     
@@ -653,7 +654,7 @@ class BatchProcessor:
                 if cleanup_intermediate:
                     self.cleanup_sen_files(list(successful_data.keys()), batch_info)
             
-            self.logger.info(f"✅ 배치 {batch_id + 1} [{folder_name}] 완료\n")
+            self.logger.info(f"✅ 배치 {batch_info['batch_id'] + 1} [{batch_info['folder_name']}] 완료\n")
         
         self.logger.info("🎉 전체 폴더별 배치 처리 완료!")
         
@@ -770,7 +771,7 @@ def main():
         elif choice == '3':
             batch_processor.process_all_batches(cleanup_intermediate=True)
         elif choice == '4':
-            video_data = batch_processor.collect_f_videos()
+            video_data = batch_processor.collect_videos_by_folder()
             print(f"\n📊 총 {len(video_data)}개 영상 발견:")
             for i, (sen_id, video_path) in enumerate(video_data[:10]):
                 print(f"  {i+1}. SEN{sen_id:04d} - {Path(video_path).name}")
