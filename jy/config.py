@@ -33,8 +33,8 @@ IMAGENET_STD = [0.229, 0.224, 0.225]    # 0-1 스케일
 
 # YOLO 모델 설정 - 명확한 경로 지정
 YOLO_MODEL_CONFIG = {
-    "filename": "yolo11m.pt",
-    "path": os.path.join(MODELS_DIR, "yolo11m.pt"),  # 명확한 절대 경로
+    "filename": "yolo11l.pt",
+    "path": os.path.join(MODELS_DIR, "yolo11l.pt"),  # 명확한 절대 경로
     "url": None,  # ultralytics에서 자동 다운로드
     "description": "YOLOv11 Medium - 사람 검출용"
 }
