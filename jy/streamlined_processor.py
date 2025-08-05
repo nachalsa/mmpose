@@ -411,18 +411,25 @@ class StreamlinedVideoProcessor:
 
 
 class BatchProcessor:
-    """250개 단위 배치 처리기"""
+    """폴더별 250개 단위 배치 처리기"""
     
     def __init__(self, 
-                 data_root: str = "data/1.Training",  # 상대 경로로 변경
+                 data_root: str = "data/1.Training",
                  output_dir: str = "sign_language_dataset",
                  batch_size: int = 250,
-                 rtmw_model_name: str = "rtmw-x"):  # RTMW 모델 선택 옵션 추가
+                 rtmw_model_name: str = "rtmw-x",
+                 direction: str = "F"):
         
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.batch_size = batch_size
         self.rtmw_model_name = rtmw_model_name
+        self.direction = direction.upper()  # F, U, L, R, D 방향
+        
+        # 방향 유효성 검사
+        valid_directions = {'F', 'U', 'L', 'R', 'D'}
+        if self.direction not in valid_directions:
+            raise ValueError(f"Invalid direction: {direction}. Must be one of {valid_directions}")
         
         # 로깅 설정
         logging.basicConfig(
@@ -442,32 +449,35 @@ class BatchProcessor:
         self.sen_output_dir.mkdir(parents=True, exist_ok=True)
         self.hdf5_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 스트림라인 처리기 초기화 (모델 자동 다운로드 포함)
-        self.logger.info(f"🚀 모델 초기화 시작 (RTMW: {rtmw_model_name})")
+        # 스트림라인 처리기 초기화
+        self.logger.info(f"🚀 모델 초기화 시작 (RTMW: {rtmw_model_name}, 방향: {self.direction})")
         self.processor = StreamlinedVideoProcessor(rtmw_model_name=rtmw_model_name)
         self.logger.info("✅ 배치 처리기 초기화 완료")
 
-    def collect_f_videos(self) -> List[Tuple[int, str]]:
-        """F 방향 영상 수집 (라벨 무관)"""
+    def collect_videos_by_folder(self) -> Dict[str, List[Tuple[int, str]]]:
+        """폴더별로 지정된 방향 영상 수집"""
         videos_base_dir = self.data_root / "videos"
-        
-        video_data = []
+        folder_video_data = {}
         
         if not videos_base_dir.exists():
             self.logger.error(f"❌ videos 폴더 없음: {videos_base_dir}")
-            return video_data
+            return folder_video_data
         
-        # videos 하위의 모든 폴더 자동 검색
+        # videos 하위의 모든 폴더 검색
         for sub_dir in videos_base_dir.iterdir():
             if not sub_dir.is_dir():
                 continue
                 
-            self.logger.info(f"🔍 검색 중: {sub_dir}")
+            folder_name = sub_dir.name
+            video_data = []
             
-            # F 방향 영상 파일 검색
-            for video_file in sub_dir.glob("*_F.mp4"):
+            self.logger.info(f"🔍 폴더 검색 중: {folder_name} ({self.direction} 방향)")
+            
+            # 지정된 방향 영상 파일 검색
+            pattern = f"*_{self.direction}.mp4"
+            for video_file in sub_dir.glob(pattern):
                 try:
-                    # SEN 번호 추출 (예: NIA_SL_SEN0001_REAL03_F.mp4 → 1)
+                    # SEN 번호 추출
                     filename = video_file.stem
                     if '_SEN' not in filename:
                         self.logger.warning(f"⚠️ SEN 번호를 찾을 수 없음: {filename}")
@@ -477,68 +487,136 @@ class BatchProcessor:
                     sen_id = int(sen_match)
                     
                     video_data.append((sen_id, str(video_file)))
-                    self.logger.debug(f"✅ 발견: SEN{sen_id:04d} - {video_file.name}")
+                    self.logger.debug(f"✅ 발견: {folder_name}/SEN{sen_id:04d} - {video_file.name}")
                     
                 except (IndexError, ValueError) as e:
                     self.logger.warning(f"⚠️ SEN ID 추출 실패: {filename} - {e}")
                     continue
+            
+            if video_data:
+                # 폴더 내에서 SEN ID로 정렬
+                video_data.sort(key=lambda x: x[0])
+                folder_video_data[folder_name] = video_data
+                
+                min_sen = min(video_data, key=lambda x: x[0])[0]
+                max_sen = max(video_data, key=lambda x: x[0])[0]
+                self.logger.info(f"📊 {folder_name}: {len(video_data)}개 영상, SEN{min_sen:04d}~SEN{max_sen:04d}")
         
-        # SEN ID로 정렬
-        video_data.sort(key=lambda x: x[0])
+        total_videos = sum(len(videos) for videos in folder_video_data.values())
+        self.logger.info(f"🎬 총 {len(folder_video_data)}개 폴더에서 {total_videos}개 {self.direction} 방향 영상 발견")
         
-        self.logger.info(f"🎬 F 방향 영상 총 {len(video_data)}개 발견")
-        
-        # 상세 통계
-        if video_data:
-            min_sen = min(video_data, key=lambda x: x[0])[0]
-            max_sen = max(video_data, key=lambda x: x[0])[0]
-            self.logger.info(f"📊 SEN 범위: SEN{min_sen:04d} ~ SEN{max_sen:04d}")
-        
-        return video_data
+        return folder_video_data
 
-    def create_batches(self, video_data: List[Tuple[int, str]]) -> List[List[Tuple[int, str]]]:
-        """비디오 데이터를 배치로 분할"""
-        batches = []
-        for i in range(0, len(video_data), self.batch_size):
-            batch = video_data[i:i + self.batch_size]
-            batches.append(batch)
+    def collect_f_videos(self) -> List[Tuple[int, str]]:
+        """기존 API 호환성을 위한 래퍼 함수 (F 방향 고정)"""
+        self.logger.warning("⚠️ collect_f_videos()는 deprecated입니다. collect_videos_by_folder()를 사용하세요.")
         
-        self.logger.info(f"📦 총 {len(batches)}개 배치로 분할 (배치 크기: {self.batch_size})")
-        return batches
+        # 임시로 방향을 F로 설정하고 데이터 수집
+        original_direction = self.direction
+        self.direction = "F"
+        
+        folder_data = self.collect_videos_by_folder()
+        
+        # 원래 방향으로 복원
+        self.direction = original_direction
+        
+        # 모든 폴더의 데이터를 하나의 리스트로 합치고 SEN ID로 정렬
+        all_videos = []
+        for folder_videos in folder_data.values():
+            all_videos.extend(folder_videos)
+        
+        all_videos.sort(key=lambda x: x[0])
+        return all_videos
 
-    def process_sen_batch(self, batch_data: List[Tuple[int, str]], batch_idx: int) -> List[int]:
+    def create_batches_by_folder(self, folder_video_data: Dict[str, List[Tuple[int, str]]]) -> List[Dict]:
+        """폴더별로 배치 생성"""
+        all_batches = []
+        batch_counter = 0
+        
+        for folder_name, video_data in folder_video_data.items():
+            self.logger.info(f"📦 {folder_name} 폴더 배치 생성 중...")
+            
+            # 폴더 내 영상을 배치 크기로 분할
+            folder_batches = []
+            for i in range(0, len(video_data), self.batch_size):
+                batch_data = video_data[i:i + self.batch_size]
+                
+                batch_info = {
+                    'batch_id': batch_counter,
+                    'folder_name': folder_name,
+                    'folder_batch_idx': len(folder_batches),  # 폴더 내 배치 인덱스
+                    'data': batch_data,
+                    'sen_range': (batch_data[0][0], batch_data[-1][0])  # SEN ID 범위
+                }
+                
+                folder_batches.append(batch_info)
+                all_batches.append(batch_info)
+                batch_counter += 1
+            
+            self.logger.info(f"   └─ {folder_name}: {len(folder_batches)}개 배치 생성")
+            for batch in folder_batches:
+                sen_start, sen_end = batch['sen_range']
+                self.logger.info(f"      배치 {batch['batch_id']}: SEN{sen_start:04d}~SEN{sen_end:04d} ({len(batch['data'])}개)")
+        
+        self.logger.info(f"📦 전체 {len(all_batches)}개 배치 생성 완료")
+        return all_batches
+
+    def process_sen_batch(self, batch_info: Dict) -> List[int]:
         """SEN 배치 처리 (비디오 → 넘파이 배열)"""
+        batch_id = batch_info['batch_id']
+        folder_name = batch_info['folder_name']
+        batch_data = batch_info['data']
+        sen_start, sen_end = batch_info['sen_range']
+        
         successful_sen_ids = []
         
-        self.logger.info(f"🔄 배치 {batch_idx} SEN 처리 시작 ({len(batch_data)}개 영상)")
+        self.logger.info(f"🔄 배치 {batch_id} [{folder_name}] SEN{sen_start:04d}~SEN{sen_end:04d} 처리 시작 ({len(batch_data)}개)")
         
-        for sen_id, video_path in tqdm(batch_data, desc=f"배치 {batch_idx} 처리"):
+        for sen_id, video_path in tqdm(batch_data, desc=f"배치 {batch_id} [{folder_name}]"):
             success = self.processor.process_sen_video(sen_id, video_path, self.sen_output_dir)
             if success:
                 successful_sen_ids.append(sen_id)
         
-        self.logger.info(f"✅ 배치 {batch_idx} SEN 처리 완료: {len(successful_sen_ids)}/{len(batch_data)}개 성공")
+        self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] 처리 완료: {len(successful_sen_ids)}/{len(batch_data)}개 성공")
         return successful_sen_ids
 
-    def create_hdf5_batch(self, sen_ids: List[int], batch_data: List[Tuple[int, str]], batch_idx: int):
-        """SEN 배열들을 HDF5 배치로 변환 (라벨 없이)"""
+    def create_hdf5_batch(self, sen_ids: List[int], batch_info: Dict):
+        """SEN 배열들을 HDF5 배치로 변환"""
         try:
-            self.logger.info(f"📦 배치 {batch_idx} HDF5 생성 시작")
+            batch_id = batch_info['batch_id']
+            folder_name = batch_info['folder_name']
+            folder_batch_idx = batch_info['folder_batch_idx']
+            sen_start, sen_end = batch_info['sen_range']
             
-            # HDF5 파일 경로
-            frames_h5 = self.hdf5_output_dir / f"batch_{batch_idx:02d}_F_frames.h5"
-            poses_h5 = self.hdf5_output_dir / f"batch_{batch_idx:02d}_F_poses.h5"
+            self.logger.info(f"📦 배치 {batch_id} [{folder_name}] HDF5 생성 시작")
+            
+            # HDF5 파일 경로 (개선된 네이밍 규칙)
+            frames_h5 = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
+            poses_h5 = self.hdf5_output_dir / f"batch_SEN_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
             
             with h5py.File(frames_h5, 'w') as f_frames, \
                  h5py.File(poses_h5, 'w') as f_poses:
                 
-                for sen_id in tqdm(sen_ids, desc=f"HDF5 배치 {batch_idx}"):
+                # 배치 메타데이터 저장
+                batch_metadata = {
+                    # 'batch_id': batch_id,
+                    'folder_name': folder_name,
+                    'folder_batch_idx': folder_batch_idx,
+                    'sen_range': [sen_start, sen_end],
+                    'video_count': len(sen_ids),
+                    'creation_time': str(datetime.now())
+                }
+                
+                f_frames.attrs.update(batch_metadata)
+                f_poses.attrs.update(batch_metadata)
+                
+                for sen_id in tqdm(sen_ids, desc=f"HDF5 배치 {batch_id} [{folder_name} {folder_batch_idx}]"):
                     sen_dir = self.sen_output_dir / f"SEN{sen_id:04d}"
                     
                     # 넘파이 배열 로드
                     crop_images = np.load(sen_dir / "crop_images.npy")
-                    keypoints_scaled = np.load(sen_dir / "keypoints_scaled.npy")  # 8배 스케일링된 정수 좌표
-                    keypoints_original = np.load(sen_dir / "keypoints_original.npy")  # 원본 float 좌표
+                    keypoints_scaled = np.load(sen_dir / "keypoints_scaled.npy")
+                    keypoints_original = np.load(sen_dir / "keypoints_original.npy")
                     scores = np.load(sen_dir / "scores.npy")
                     
                     # 메타데이터 로드
@@ -566,72 +644,126 @@ class BatchProcessor:
                                          data=scores, 
                                          compression='gzip', compression_opts=1)
             
-            self.logger.info(f"✅ 배치 {batch_idx} HDF5 생성 완료")
-            self.logger.info(f"   - 프레임: {frames_h5}")
-            self.logger.info(f"   - 포즈: {poses_h5}")
+            self.logger.info(f"✅ 배치 {batch_id} [{folder_name} {folder_batch_idx}] HDF5 생성 완료")
+            self.logger.info(f"   - 프레임: {frames_h5.name}")
+            self.logger.info(f"   - 포즈: {poses_h5.name}")
             
         except Exception as e:
-            self.logger.error(f"❌ 배치 {batch_idx} HDF5 생성 실패: {e}")
+            self.logger.error(f"❌ 배치 {batch_id} [{folder_name} {folder_batch_idx}] HDF5 생성 실패: {e}")
 
-    def cleanup_sen_files(self, sen_ids: List[int]):
-        """SEN 중간 파일들 정리 (선택적)"""
+    def cleanup_sen_files(self, sen_ids: List[int], batch_info: Dict):
+        """SEN 중간 파일들 정리"""
+        batch_id = batch_info['batch_id']
+        folder_name = batch_info['folder_name']
+        
         for sen_id in sen_ids:
             sen_dir = self.sen_output_dir / f"SEN{sen_id:04d}"
             if sen_dir.exists():
                 import shutil
                 shutil.rmtree(sen_dir)
         
-        self.logger.info(f"🧹 SEN 중간 파일 {len(sen_ids)}개 정리 완료")
+        self.logger.info(f"🧹 배치 {batch_id} [{folder_name}] 중간 파일 {len(sen_ids)}개 정리 완료")
 
     def process_all_batches(self, cleanup_intermediate: bool = False):
-        """전체 배치 처리 파이프라인"""
-        # 1. F 방향 영상 수집
-        video_data = self.collect_f_videos()
-        if not video_data:
+        """전체 배치 처리 파이프라인 (폴더별)"""
+        # 1. 폴더별 지정 방향 영상 수집
+        folder_video_data = self.collect_videos_by_folder()
+        if not folder_video_data:
             self.logger.error("❌ 처리할 영상이 없습니다")
             return
         
-        # 2. 배치 분할
-        batches = self.create_batches(video_data)
+        # 2. 폴더별 배치 생성
+        all_batches = self.create_batches_by_folder(folder_video_data)
         
         # 3. 각 배치 처리
-        for batch_idx, batch_data in enumerate(batches):
-            self.logger.info(f"\n🚀 배치 {batch_idx + 1}/{len(batches)} 처리 시작")
+        for batch_info in all_batches:
+            batch_id = batch_info['batch_id']
+            folder_name = batch_info['folder_name']
+            total_batches = len(all_batches)
+            
+            self.logger.info(f"\n🚀 배치 {batch_id + 1}/{total_batches} [{folder_name}] 처리 시작")
             
             # 3-1. SEN 처리 (비디오 → 넘파이)
-            successful_sen_ids = self.process_sen_batch(batch_data, batch_idx)
+            successful_sen_ids = self.process_sen_batch(batch_info)
             
             if successful_sen_ids:
                 # 3-2. HDF5 생성 (넘파이 → HDF5)
-                self.create_hdf5_batch(successful_sen_ids, batch_data, batch_idx)
+                self.create_hdf5_batch(successful_sen_ids, batch_info)
                 
                 # 3-3. 중간 파일 정리 (선택적)
                 if cleanup_intermediate:
-                    self.cleanup_sen_files(successful_sen_ids)
+                    self.cleanup_sen_files(successful_sen_ids, batch_info)
             
-            self.logger.info(f"✅ 배치 {batch_idx + 1} 완료\n")
+            self.logger.info(f"✅ 배치 {batch_id + 1} [{folder_name}] 완료\n")
         
-        self.logger.info("🎉 전체 배치 처리 완료!")
+        self.logger.info("🎉 전체 폴더별 배치 처리 완료!")
+        
+        # 최종 통계
+        self.print_final_statistics(all_batches)
 
-    def process_test_batch(self, test_count: int = 5):
-        """테스트용 소규모 배치 처리"""
-        video_data = self.collect_f_videos()[:test_count]
+    def print_final_statistics(self, all_batches: List[Dict]):
+        """최종 처리 결과 통계 출력"""
+        folder_stats = {}
         
-        self.logger.info(f"🧪 테스트 배치 처리 시작 ({test_count}개 영상)")
+        for batch_info in all_batches:
+            folder_name = batch_info['folder_name']
+            if folder_name not in folder_stats:
+                folder_stats[folder_name] = {'batches': 0, 'videos': 0}
+            
+            folder_stats[folder_name]['batches'] += 1
+            folder_stats[folder_name]['videos'] += len(batch_info['data'])
+        
+        self.logger.info("\n📊 최종 처리 통계:")
+        self.logger.info("=" * 50)
+        
+        total_batches = 0
+        total_videos = 0
+        
+        for folder_name, stats in folder_stats.items():
+            batches = stats['batches']
+            videos = stats['videos']
+            self.logger.info(f"📁 {folder_name}: {batches}개 배치, {videos}개 영상")
+            total_batches += batches
+            total_videos += videos
+        
+        self.logger.info("=" * 50)
+        self.logger.info(f"🎯 전체: {total_batches}개 배치, {total_videos}개 영상")
+
+    def process_test_batch(self, folder_name: str = None, test_count: int = 5):
+        """테스트용 소규모 배치 처리 (특정 폴더 또는 첫 번째 폴더)"""
+        folder_video_data = self.collect_videos_by_folder()
+        
+        if not folder_video_data:
+            self.logger.error("❌ 처리할 영상이 없습니다")
+            return
+        
+        # 테스트할 폴더 선택
+        if folder_name and folder_name in folder_video_data:
+            test_folder = folder_name
+        else:
+            test_folder = list(folder_video_data.keys())[0]
+        
+        video_data = folder_video_data[test_folder][:test_count]
+        
+        self.logger.info(f"🧪 테스트 배치 처리 시작 [{test_folder}] ({len(video_data)}개 {self.direction} 방향 영상)")
+        
+        # 테스트 배치 정보 생성
+        batch_info = {
+            'batch_id': 999,  # 테스트용 배치 번호
+            'folder_name': test_folder,
+            'folder_batch_idx': 0,
+            'data': video_data,
+            'sen_range': (video_data[0][0], video_data[-1][0])
+        }
         
         # SEN 처리
-        successful_sen_ids = []
-        for sen_id, video_path in video_data:
-            success = self.processor.process_sen_video(sen_id, video_path, self.sen_output_dir)
-            if success:
-                successful_sen_ids.append(sen_id)
+        successful_sen_ids = self.process_sen_batch(batch_info)
         
         # HDF5 생성
         if successful_sen_ids:
-            self.create_hdf5_batch(successful_sen_ids, video_data, 99)  # 테스트용 배치 번호
+            self.create_hdf5_batch(successful_sen_ids, batch_info)
         
-        self.logger.info(f"✅ 테스트 배치 완료 ({len(successful_sen_ids)}/{test_count}개 성공)")
-
+        self.logger.info(f"✅ 테스트 배치 완료 [{test_folder}] ({len(successful_sen_ids)}/{len(video_data)}개 성공)")
 
 def main():
     """메인 실행 함수"""
