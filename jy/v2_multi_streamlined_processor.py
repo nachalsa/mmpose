@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-최적화된 비디오 처리기 - PyTorch 2.6 호환성 포함
+향상된 스트림라인 비디오 처리기 - 배치 병렬화 + YOLO CPU 옵션 지원
+GPU/CPU 하이브리드 처리를 통해 성능 극대화
 """
 
 import os
@@ -20,89 +21,15 @@ import re
 import multiprocessing as mp
 import queue
 import threading
-import torch
-import torch.serialization
-
-# PyTorch 2.6 호환성 패치
-def apply_pytorch_patch():
-    """PyTorch 2.6 호환성 패치"""
-    if torch.__version__.startswith('2.6'):
-        try:
-            import numpy.core.multiarray
-            import collections
-            safe_globals = [
-                numpy.core.multiarray._reconstruct,
-                numpy.ndarray,
-                numpy.dtype,
-                collections.OrderedDict
-            ]
-            torch.serialization.add_safe_globals(safe_globals)
-            print(f"✅ PyTorch {torch.__version__} 호환성 패치 적용 완료")
-        except Exception as e:
-            print(f"⚠️ 패치 실패: {e}")
-
-# 패치 자동 적용
-apply_pytorch_patch()
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 설정 및 MMPose 관련 임포트
 from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
+from yolo11l_xpu_hybrid_inferencer import YOLO11LXPUHybridInferencer
 
-# PyTorch 2.6에서 안전한 전역 객체 허용
-def apply_pytorch_patch():
-    """PyTorch 2.6 호환성을 위한 패치 적용"""
-    try:
-        # numpy 관련 전역 객체들을 안전한 목록에 추가
-        safe_globals = [
-            'numpy.core.multiarray._reconstruct',
-            'numpy.ndarray',
-            'numpy.dtype',
-            'numpy.core.multiarray.scalar',
-            'collections.OrderedDict',
-            'torch._utils._rebuild_tensor_v2'
-        ]
-        
-        # 각 전역 객체를 허용 목록에 추가
-        for global_name in safe_globals:
-            try:
-                # 동적으로 모듈과 객체를 가져와서 추가
-                module_path, obj_name = global_name.rsplit('.', 1)
-                
-                if module_path == 'numpy.core.multiarray':
-                    import numpy.core.multiarray
-                    obj = getattr(numpy.core.multiarray, obj_name)
-                elif module_path == 'numpy':
-                    import numpy
-                    obj = getattr(numpy, obj_name)
-                elif module_path == 'collections':
-                    import collections
-                    obj = getattr(collections, obj_name)
-                elif module_path == 'torch._utils':
-                    import torch._utils
-                    obj = getattr(torch._utils, obj_name)
-                else:
-                    continue
-                    
-                torch.serialization.add_safe_globals([obj])
-                print(f"✅ 안전한 전역 객체 추가: {global_name}")
-                
-            except (ImportError, AttributeError) as e:
-                print(f"⚠️ 전역 객체 추가 실패: {global_name} - {e}")
-                
-    except Exception as e:
-        print(f"⚠️ 패치 적용 중 오류: {e}")
-        print("💡 대안: PyTorch 버전을 2.5.1로 다운그레이드하세요")
-
-# 모듈 임포트 시 자동으로 패치 적용
-if torch.__version__.startswith('2.6'):
-    print(f"🔧 PyTorch {torch.__version__} 감지, 호환성 패치 적용 중...")
-    apply_pytorch_patch()
-    
-# 설정 및 MMPose 관련 임포트
-from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
-
-# RTMW 전처리 함수들 (video_processor_yolo11l.py에서 가져옴)
+# RTMW 전처리 함수들 (기존과 동일)
 def bbox_xyxy2cs(bbox: np.ndarray, padding: float = 1.10) -> Tuple[np.ndarray, np.ndarray]:
-    """바운딩박스를 center, scale로 변환"""
+    """바운딩박스를 center, scale로 변환 (패딩 1.10으로 수정)"""
     dim = bbox.ndim
     if dim == 1:
         bbox = bbox[None, :]
@@ -146,6 +73,7 @@ def get_warp_matrix(center: np.ndarray, scale: np.ndarray, rot: float,
     dst[0, :] = [dst_w * 0.5, dst_h * 0.5]
     dst[1, :] = np.array([dst_w * 0.5, dst_h * 0.5]) + dst_dir
     
+    # aspect ratio 고정
     src[2, :] = _get_3rd_point(src[0, :], src[1, :])
     dst[2, :] = _get_3rd_point(dst[0, :], dst[1, :])
     
@@ -163,32 +91,39 @@ def fix_aspect_ratio(bbox_scale: np.ndarray, aspect_ratio: float) -> np.ndarray:
         bbox_scale = np.array([new_w, h])
     return bbox_scale
 
-class OptimizedInferencer:
-    """CPU YOLO + GPU 배치 RTMW 추론기"""
+class EnhancedStreamlinedVideoProcessor:
+    """향상된 스트림라인 비디오 처리기 - CPU YOLO 옵션 지원"""
     
     def __init__(self, 
-                 rtmw_config_path: str,
-                 rtmw_model_path: str,
-                 yolo_device: str = 'cpu',  # 'cpu' or 'xpu'
-                 pose_device: str = 'xpu',
-                 batch_size: int = 8):
+                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
+                 rtmw_model_name: str = "rtmw-x",
+                 yolo_device: str = "xpu",  # "xpu" 또는 "cpu"
+                 pose_device: str = "xpu"):  # "xpu" 또는 "cpu"
         
         self.logger = logging.getLogger(__name__)
+        self.keypoint_scale = 8
         self.yolo_device = yolo_device
         self.pose_device = pose_device
-        self.batch_size = batch_size
         
-        # YOLO 모델 초기화
-        from ultralytics import YOLO
+        try:
+            base_dir = Path(__file__).parent.parent
+        except NameError:
+            base_dir = Path.cwd().parent
+        rtmw_config_path = str(base_dir / rtmw_config_path)
+        
         yolo_model_path = self._ensure_yolo_model()
-        self.yolo_model = YOLO(yolo_model_path)
+        rtmw_model_path = self._ensure_rtmw_model(rtmw_model_name)
         
-        self.logger.info(f"✅ YOLO 로딩 완료 (디바이스: {yolo_device})")
+        self.inferencer = YOLO11LXPUHybridInferencer(
+            rtmw_config=rtmw_config_path,
+            rtmw_checkpoint=rtmw_model_path,
+            detection_device=yolo_device,
+            pose_device=pose_device,
+            optimize_for_accuracy=True
+        )
         
-        # RTMW 모델 초기화 (GPU에서 배치 처리)
-        self._init_rtmw_model(rtmw_config_path, rtmw_model_path)
-        
-        self.logger.info(f"✅ RTMW 로딩 완료 (디바이스: {pose_device}, 배치크기: {batch_size})")
+        device_info = f"YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()}"
+        self.logger.info(f"✅ 향상된 스트림라인 비디오 처리기 초기화 완료 ({device_info})")
 
     def _ensure_yolo_model(self) -> str:
         """YOLO 모델 파일 확인 및 다운로드"""
@@ -196,209 +131,41 @@ class OptimizedInferencer:
         model_path = Path(MODELS_DIR) / yolo_config["filename"]
         
         if model_path.exists():
+            self.logger.info(f"✅ 기존 YOLO 모델 발견: {model_path}")
             return str(model_path)
         
-        self.logger.info(f"📥 YOLO 모델 다운로드: {yolo_config['filename']}")
+        self.logger.info(f"📥 YOLO 모델 다운로드 시작: {yolo_config['filename']}")
+        
+        # models 디렉토리 생성
         Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
         
         try:
             from ultralytics import YOLO
             temp_model = YOLO(yolo_config["filename"])
             cache_dir = Path.home() / '.cache' / 'ultralytics'
+            downloaded_model = None
             
             for weights_dir in [cache_dir, cache_dir / 'weights']:
                 if weights_dir.exists():
                     for model_file in weights_dir.glob(yolo_config["filename"]):
-                        shutil.copy2(model_file, model_path)
-                        self.logger.info(f"✅ YOLO 모델 복사 완료: {model_path}")
-                        return str(model_path)
+                        downloaded_model = model_file
+                        break
+                if downloaded_model:
+                    break
             
-            return yolo_config["filename"]
+            if downloaded_model and downloaded_model.exists():
+                shutil.copy2(downloaded_model, model_path)
+                self.logger.info(f"✅ YOLO 모델 복사 완료: {model_path}")
+                self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
+                return str(model_path)
+            else:
+                self.logger.warning(f"⚠️ YOLO 모델 다운로드 위치를 찾을 수 없음")
+                return yolo_config["filename"]
+            
         except Exception as e:
             self.logger.warning(f"⚠️ YOLO 모델 다운로드 실패: {e}")
+            self.logger.info("   ultralytics가 자동으로 다운로드할 예정")
             return yolo_config["filename"]
-
-    def _init_rtmw_model(self, config_path: str, model_path: str):
-        """RTMW 모델 초기화"""
-        try:
-            from mmpose.apis import MMPoseInferencer
-            # MMPose 버전별 호환성 처리
-            try:
-                # 최신 버전 (pose2d 파라미터 사용)
-                self.rtmw_inferencer = MMPoseInferencer(
-                    pose2d=config_path,
-                    pose2d_weights=model_path,
-                    device=self.pose_device
-                )
-            except TypeError:
-                try:
-                    # 이전 버전 (model 파라미터 사용)
-                    self.rtmw_inferencer = MMPoseInferencer(
-                        model=config_path,
-                        weights=model_path,
-                        device=self.pose_device
-                    )
-                except TypeError:
-                    # 가장 기본적인 초기화 방식
-                    self.rtmw_inferencer = MMPoseInferencer(
-                        config_path, 
-                        model_path, 
-                        device=self.pose_device
-                    )
-        except ImportError:
-            self.logger.error("❌ mmpose를 설치해주세요: pip install mmpose")
-            raise
-        except Exception as e:
-            self.logger.error(f"❌ RTMW 모델 초기화 실패: {e}")
-            self.logger.info("💡 MMPose 버전을 확인해주세요: pip show mmpose")
-            raise
-
-    def detect_persons_cpu(self, frames: List[np.ndarray]) -> List[List[List[float]]]:
-        """CPU에서 YOLO 객체 탐지 (여러 프레임 처리)"""
-        all_bboxes = []
-        
-        for frame in frames:
-            try:
-                # CPU에서 YOLO 실행
-                results = self.yolo_model(frame, device=self.yolo_device, verbose=False)
-                
-                person_bboxes = []
-                for result in results:
-                    if hasattr(result, 'boxes') and result.boxes is not None:
-                        boxes = result.boxes
-                        for i, cls in enumerate(boxes.cls):
-                            if int(cls) == 0:  # person class
-                                bbox = boxes.xyxy[i].cpu().numpy().tolist()
-                                conf = float(boxes.conf[i])
-                                if conf > 0.5:  # 신뢰도 임계값
-                                    person_bboxes.append(bbox)
-                
-                # 가장 큰 박스만 선택 (면적 기준)
-                if person_bboxes:
-                    areas = [(box[2] - box[0]) * (box[3] - box[1]) for box in person_bboxes]
-                    max_idx = np.argmax(areas)
-                    all_bboxes.append([person_bboxes[max_idx]])
-                else:
-                    all_bboxes.append([])
-                    
-            except Exception as e:
-                self.logger.warning(f"YOLO 탐지 실패: {e}")
-                all_bboxes.append([])
-        
-        return all_bboxes
-
-    def crop_batch_images(self, frames: List[np.ndarray], bboxes_list: List[List[List[float]]]) -> Tuple[List[np.ndarray], List[bool]]:
-        """배치로 이미지 크롭"""
-        cropped_images = []
-        valid_mask = []
-        
-        for frame, bboxes in zip(frames, bboxes_list):
-            if bboxes:
-                bbox = bboxes[0]  # 첫 번째 (가장 큰) 박스
-                cropped = self._crop_person_image_rtmw(frame, bbox)
-                if cropped is not None:
-                    cropped_images.append(cropped)
-                    valid_mask.append(True)
-                else:
-                    valid_mask.append(False)
-            else:
-                valid_mask.append(False)
-        
-        return cropped_images, valid_mask
-
-    def _crop_person_image_rtmw(self, image: np.ndarray, bbox: List[float]) -> Optional[np.ndarray]:
-        """RTMW 방식으로 사람 이미지 크롭"""
-        try:
-            input_width, input_height = 288, 384
-            bbox_array = np.array(bbox, dtype=np.float32)
-            center, scale = bbox_xyxy2cs(bbox_array)
-            aspect_ratio = input_width / input_height
-            scale = fix_aspect_ratio(scale, aspect_ratio)
-            
-            warp_mat = get_warp_matrix(
-                center=center,
-                scale=scale, 
-                rot=0.0,
-                output_size=(input_width, input_height)
-            )
-            
-            cropped_image = cv2.warpAffine(
-                image, warp_mat, (input_width, input_height),
-                flags=cv2.INTER_LINEAR
-            )
-            return cropped_image
-            
-        except Exception as e:
-            self.logger.warning(f"⚠️ RTMW 전처리 실패: {e}")
-            return None
-
-    def estimate_pose_batch(self, cropped_images: List[np.ndarray]) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        """배치로 포즈 추정"""
-        if not cropped_images:
-            return [], []
-        
-        try:
-            # MMPose 배치 추론
-            batch_results = self.rtmw_inferencer(cropped_images, return_vis=False)
-            
-            keypoints_list = []
-            scores_list = []
-            
-            for result in batch_results:
-                if 'predictions' in result and len(result['predictions']) > 0:
-                    pred = result['predictions'][0]  # 첫 번째 사람
-                    keypoints = pred['keypoints']  # shape: (133, 2)
-                    keypoint_scores = pred.get('keypoint_scores', np.ones(len(keypoints)))
-                    
-                    keypoints_list.append(keypoints)
-                    scores_list.append(keypoint_scores)
-                else:
-                    # 실패한 경우 더미 데이터
-                    keypoints_list.append(np.zeros((133, 2)))
-                    scores_list.append(np.zeros(133))
-            
-            return keypoints_list, scores_list
-            
-        except Exception as e:
-            self.logger.error(f"배치 포즈 추정 실패: {e}")
-            # 실패 시 더미 데이터 반환
-            dummy_keypoints = [np.zeros((133, 2)) for _ in cropped_images]
-            dummy_scores = [np.zeros(133) for _ in cropped_images]
-            return dummy_keypoints, dummy_scores
-
-class OptimizedVideoProcessor:
-    """최적화된 비디오 처리기 (CPU YOLO + 배치 RTMW)"""
-    
-    def __init__(self,
-                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
-                 rtmw_model_name: str = "rtmw-x",
-                 yolo_device: str = 'cpu',
-                 batch_size: int = 8):
-        
-        self.logger = logging.getLogger(__name__)
-        self.keypoint_scale = 8
-        self.batch_size = batch_size
-        
-        # 경로 설정
-        try:
-            base_dir = Path(__file__).parent.parent
-        except NameError:
-            base_dir = Path.cwd().parent
-        rtmw_config_path = str(base_dir / rtmw_config_path)
-        
-        # 모델 다운로드 확인
-        rtmw_model_path = self._ensure_rtmw_model(rtmw_model_name)
-        
-        # 추론기 초기화
-        self.inferencer = OptimizedInferencer(
-            rtmw_config_path=rtmw_config_path,
-            rtmw_model_path=rtmw_model_path,
-            yolo_device=yolo_device,
-            pose_device='xpu',
-            batch_size=batch_size
-        )
-        
-        self.logger.info(f"✅ 최적화된 비디오 처리기 초기화 완료 (YOLO: {yolo_device}, 배치: {batch_size})")
 
     def _ensure_rtmw_model(self, model_name: str = "rtmw-x") -> str:
         """RTMW 모델 파일 확인 및 다운로드"""
@@ -418,25 +185,74 @@ class OptimizedVideoProcessor:
             self.logger.info(f"✅ 기존 RTMW 모델 발견: {model_path}")
             return str(model_path)
         
-        # 다운로드 로직 (기존과 동일)
-        self.logger.info(f"📥 RTMW 모델 다운로드: {rtmw_config['filename']}")
+        self.logger.info(f"📥 RTMW 모델 다운로드 시작: {rtmw_config['filename']}")
         model_path.parent.mkdir(parents=True, exist_ok=True)
         
         try:
             download_url = rtmw_config["url"]
-            if download_url:
-                urllib.request.urlretrieve(download_url, model_path)
-                if model_path.exists() and model_path.stat().st_size > 1024 * 1024:
-                    self.logger.info(f"✅ RTMW 모델 다운로드 완료: {model_path}")
-                    return str(model_path)
+            if not download_url:
+                self.logger.error(f"❌ 다운로드 URL이 없음: {rtmw_config['filename']}")
+                return str(model_path)
+            
+            self.logger.info(f"🔄 다운로드 중: {download_url}")
+            
+            def download_progress_hook(block_num, block_size, total_size):
+                if total_size > 0:
+                    percent = min(100, (block_num * block_size * 100) // total_size)
+                    if block_num % 50 == 0:
+                        self.logger.info(f"   다운로드 진행률: {percent}%")
+            
+            urllib.request.urlretrieve(download_url, model_path, download_progress_hook)
+            
+            if model_path.exists() and model_path.stat().st_size > 1024 * 1024:
+                self.logger.info(f"✅ RTMW 모델 다운로드 완료: {model_path}")
+                self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
+                return str(model_path)
+            else:
+                self.logger.error(f"❌ 다운로드된 파일이 유효하지 않음: {model_path}")
+                if model_path.exists():
+                    model_path.unlink()
+                return str(model_path)
             
         except Exception as e:
             self.logger.error(f"❌ RTMW 모델 다운로드 실패: {e}")
-        
-        return str(model_path)
+            if model_path.exists():
+                model_path.unlink()
+            return str(model_path)
+
+    def _crop_person_image_rtmw(self, image: np.ndarray, bbox: List[float]) -> Optional[np.ndarray]:
+        """RTMW 방식으로 사람 이미지 크롭"""
+        try:
+            input_width, input_height = 288, 384
+            bbox_array = np.array(bbox, dtype=np.float32)
+            center, scale = bbox_xyxy2cs(bbox_array)
+            aspect_ratio = input_width / input_height
+            scale = fix_aspect_ratio(scale, aspect_ratio)
+            warp_mat = get_warp_matrix(
+                center=center,
+                scale=scale,
+                rot=0.0,
+                output_size=(input_width, input_height)
+            )
+            cropped_image = cv2.warpAffine(
+                image, 
+                warp_mat, 
+                (input_width, input_height), 
+                flags=cv2.INTER_LINEAR
+            )
+            h, w = cropped_image.shape[:2]
+            if h == input_height and w == input_width:
+                return cropped_image
+            else:
+                self.logger.warning(f"⚠️ 크기 오류: {h}x{w}, 예상: {input_height}x{input_width}")
+                return cropped_image
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ RTMW 전처리 실패: {e}")
+            return None
 
     def process_video_to_arrays(self, video_path: str) -> Optional[Dict[str, Union[List[np.ndarray], np.ndarray, int]]]:
-        """비디오를 배치 단위로 처리"""
+        """비디오를 처리하여 포즈 정보와 JPEG 인코딩된 프레임을 반환"""
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             self.logger.error(f"❌ 비디오 열기 실패: {video_path}")
@@ -444,23 +260,41 @@ class OptimizedVideoProcessor:
         
         try:
             all_jpeg_frames, all_keypoints, all_scores = [], [], []
-            frame_buffer = []
-            
-            # 프레임 배치 단위로 처리
+            frame_idx = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
-                    # 마지막 배치 처리
-                    if frame_buffer:
-                        self._process_frame_batch(frame_buffer, all_jpeg_frames, all_keypoints, all_scores)
                     break
                 
-                frame_buffer.append(frame)
+                try:
+                    vis_image, results = self.inferencer.process_frame(frame)
+                    if not results or len(results) == 0:
+                        frame_idx += 1
+                        continue
+                    
+                    _, _, bbox = results[0]
+                    crop_image = self._crop_person_image_rtmw(frame, bbox)
+                    if crop_image is None:
+                        frame_idx += 1
+                        continue
+                    
+                    keypoints, scores = self.inferencer.estimate_pose_on_crop(crop_image)
+                    ret_jpg, encoded_jpg = cv2.imencode('.jpg', crop_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    if not ret_jpg:
+                        self.logger.warning(f"프레임 {frame_idx} JPEG 인코딩 실패: {video_path}")
+                        frame_idx += 1
+                        continue
+
+                    all_jpeg_frames.append(encoded_jpg)
+                    all_keypoints.append(keypoints)
+                    all_scores.append(scores)
+                    
+                except Exception as e:
+                    self.logger.warning(f"프레임 {frame_idx} 처리 실패: {e}")
+                    frame_idx += 1
+                    continue
                 
-                # 배치 크기에 도달하면 처리
-                if len(frame_buffer) >= self.batch_size:
-                    self._process_frame_batch(frame_buffer, all_jpeg_frames, all_keypoints, all_scores)
-                    frame_buffer = []
+                frame_idx += 1
             
             if not all_jpeg_frames:
                 self.logger.warning(f"⚠️ 유효한 프레임이 없습니다: {video_path}")
@@ -477,158 +311,127 @@ class OptimizedVideoProcessor:
             self.logger.error(f"❌ 비디오 처리 실패: {video_path}, 오류: {e}")
             return None
         finally:
-            cap.release()
+            if cap:
+                cap.release()
 
-    def _process_frame_batch(self, frames: List[np.ndarray], 
-                           all_jpeg_frames: List[np.ndarray],
-                           all_keypoints: List[np.ndarray], 
-                           all_scores: List[np.ndarray]):
-        """프레임 배치 처리"""
-        try:
-            # 1. CPU YOLO 탐지 (배치)
-            bboxes_list = self.inferencer.detect_persons_cpu(frames)
-            
-            # 2. 이미지 크롭 (배치)
-            cropped_images, valid_mask = self.inferencer.crop_batch_images(frames, bboxes_list)
-            
-            if not cropped_images:
-                return
-            
-            # 3. GPU RTMW 포즈 추정 (배치)
-            keypoints_list, scores_list = self.inferencer.estimate_pose_batch(cropped_images)
-            
-            # 4. 결과 저장
-            crop_idx = 0
-            for i, (frame, is_valid) in enumerate(zip(frames, valid_mask)):
-                if is_valid and crop_idx < len(cropped_images):
-                    # JPEG 인코딩
-                    ret_jpg, encoded_jpg = cv2.imencode('.jpg', cropped_images[crop_idx], 
-                                                       [cv2.IMWRITE_JPEG_QUALITY, 90])
-                    if ret_jpg:
-                        all_jpeg_frames.append(encoded_jpg)
-                        all_keypoints.append(keypoints_list[crop_idx])
-                        all_scores.append(scores_list[crop_idx])
-                    
-                    crop_idx += 1
-                    
-        except Exception as e:
-            self.logger.warning(f"배치 처리 실패: {e}")
 
-    def process_video(self, item_type: str, item_id: int, video_path: str, output_dir: Path) -> bool:
-        """비디오 처리 및 저장"""
-        try:
-            self.logger.info(f"🎬 처리 중: {item_type}{item_id:04d} - {Path(video_path).name}")
-            start_time = time.time()
-            
-            arrays = self.process_video_to_arrays(video_path)
-            if arrays is None:
-                return False
-            
-            processing_time = time.time() - start_time
-            
-            # 결과 저장
-            item_dir = output_dir / f"{item_type}{item_id:04d}"
-            item_dir.mkdir(parents=True, exist_ok=True)
-            
-            # JPEG 프레임 저장
-            jpeg_frames_dict = {f'frame_{i}': frame for i, frame in enumerate(arrays['jpeg_frames'])}
-            np.savez_compressed(item_dir / "crop_images_jpeg.npz", **jpeg_frames_dict)
-
-            # 키포인트 저장
-            keypoints_scaled = np.round(arrays['keypoints'] * self.keypoint_scale).astype(np.int32)
-            np.save(item_dir / "keypoints_scaled.npy", keypoints_scaled)
-            np.save(item_dir / "scores.npy", arrays['scores'])
-            
-            # 메타데이터 저장
-            metadata = {
-                'item_type': item_type,
-                'item_id': item_id,
-                'video_path': str(video_path),
-                'video_filename': Path(video_path).name,
-                'frame_count': arrays['frame_count'],
-                'processing_time': processing_time,
-                'shape_info': {
-                    'frame_count': arrays['frame_count'],
-                    'keypoints_scaled': list(keypoints_scaled.shape),
-                    'scores': list(arrays['scores'].shape)
-                },
-                'keypoint_scale': self.keypoint_scale,
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-            }
-            
-            with open(item_dir / "metadata.json", 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
-            self.logger.info(f"✅ {item_type}{item_id:04d} 완료: {arrays['frame_count']}프레임, {processing_time:.2f}초")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"❌ {item_type}{item_id:04d} 처리 실패: {e}")
-            return False
-
-# 병렬 처리를 위한 워커 함수들
-def optimized_inference_worker(
+# +++ 향상된 병렬 처리 워커들 +++
+def enhanced_gpu_inference_worker(
     task_queue: mp.Queue, 
     result_queue: mp.Queue, 
+    worker_id: int,
     rtmw_model_name: str, 
     rtmw_config_path: str,
-    yolo_device: str,
-    batch_size: int
+    yolo_device: str = "xpu",
+    pose_device: str = "xpu"
 ):
-    """최적화된 추론 워커 (CPU YOLO + GPU 배치 RTMW)"""
-    print(f"🚀 최적화된 Inference Worker 시작... (YOLO: {yolo_device}, 배치: {batch_size})")
+    """향상된 GPU/CPU 하이브리드 추론 워커"""
+    print(f"🚀 추론 워커 #{worker_id} 시작 (YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()})")
     
-    processor = OptimizedVideoProcessor(
-        rtmw_model_name=rtmw_model_name,
-        rtmw_config_path=rtmw_config_path,
-        yolo_device=yolo_device,
-        batch_size=batch_size
-    )
+    try:
+        processor = EnhancedStreamlinedVideoProcessor(
+            rtmw_model_name=rtmw_model_name,
+            rtmw_config_path=rtmw_config_path,
+            yolo_device=yolo_device,
+            pose_device=pose_device
+        )
+    except Exception as e:
+        print(f"❌ 워커 #{worker_id} 초기화 실패: {e}")
+        return
     
+    processed_count = 0
     while True:
         try:
-            job = task_queue.get(timeout=5)
-            if job is None:
+            job = task_queue.get(timeout=10)
+            if job is None:  # 종료 신호
                 break
             
             job_id, item_type, item_id, video_path = job
+            
+            # 비디오 처리
             arrays = processor.process_video_to_arrays(video_path)
             result_queue.put((job_id, item_type, item_id, video_path, arrays))
-                
+            processed_count += 1
+            
         except queue.Empty:
-            print("최적화된 Worker: 작업 큐가 비었습니다. 종료합니다.")
+            print(f"워커 #{worker_id}: 작업 큐 타임아웃. 종료 준비.")
             break
         except Exception as e:
-            print(f"💥 최적화된 Worker 오류: {e}")
+            print(f"💥 워커 #{worker_id} 처리 오류: {e}")
+            if 'job' in locals():
+                result_queue.put((job[0], job[1], job[2], job[3], None))
             continue
-            
-    print("👋 최적화된 Inference Worker 종료.")
+    
+    print(f"👋 추론 워커 #{worker_id} 종료 (처리: {processed_count}개)")
 
-def cpu_postprocess_worker(result_queue: mp.Queue, output_dir: Path, keypoint_scale: int):
-    """결과 후처리 워커 (기존과 동일)"""
+def batch_postprocess_worker(
+    result_queue: mp.Queue, 
+    output_dir: Path,
+    keypoint_scale: int
+):
+    """배치 단위로 후처리하는 워커"""
+    batch_buffer = {}
+    processed_count = 0
+    
     while True:
         try:
-            result = result_queue.get(timeout=5)
+            result = result_queue.get(timeout=10)
             if result is None:
                 break
                 
             job_id, item_type, item_id, video_path, arrays = result
             
-            if arrays is None:
-                print(f"⚠️ {item_type}{item_id:04d} 처리 실패")
-                continue
+            if arrays is not None:
+                # 성공한 결과를 배치 버퍼에 저장
+                batch_buffer[f"{item_type}{item_id:04d}"] = {
+                    'arrays': arrays,
+                    'item_type': item_type,
+                    'item_id': item_id,
+                    'video_path': video_path
+                }
+                
+                # 배치 크기에 도달하면 일괄 처리
+                if len(batch_buffer) >= 10:  # 10개씩 배치 처리
+                    _process_batch_to_disk(batch_buffer, output_dir, keypoint_scale)
+                    processed_count += len(batch_buffer)
+                    batch_buffer.clear()
+                    
+        except queue.Empty:
+            print("후처리 워커: 결과 큐 타임아웃. 남은 배치 처리 중.")
+            break
+        except Exception as e:
+            print(f"💥 후처리 워커 오류: {e}")
+            continue
+    
+    # 남은 배치 처리
+    if batch_buffer:
+        _process_batch_to_disk(batch_buffer, output_dir, keypoint_scale)
+        processed_count += len(batch_buffer)
+    
+    print(f"👋 후처리 워커 종료 (처리: {processed_count}개)")
 
-            item_dir = output_dir / f"{item_type}{item_id:04d}"
+def _process_batch_to_disk(batch_data: Dict, output_dir: Path, keypoint_scale: int):
+    """배치 데이터를 디스크에 저장"""
+    try:
+        for key, data in batch_data.items():
+            arrays = data['arrays']
+            item_type = data['item_type']
+            item_id = data['item_id']
+            video_path = data['video_path']
+            
+            item_dir = output_dir / key
             item_dir.mkdir(parents=True, exist_ok=True)
             
-            # 파일 저장
+            # npz 파일 저장
             jpeg_frames_dict = {f'frame_{i}': frame for i, frame in enumerate(arrays['jpeg_frames'])}
             np.savez_compressed(item_dir / "crop_images_jpeg.npz", **jpeg_frames_dict)
-
+            
+            # npy 파일 저장
             keypoints_scaled = np.round(arrays['keypoints'] * keypoint_scale).astype(np.int32)
             np.save(item_dir / "keypoints_scaled.npy", keypoints_scaled)
             np.save(item_dir / "scores.npy", arrays['scores'])
             
+            # 메타데이터 저장
             metadata = {
                 'item_type': item_type,
                 'item_id': item_id,
@@ -645,15 +448,13 @@ def cpu_postprocess_worker(result_queue: mp.Queue, output_dir: Path, keypoint_sc
             }
             with open(item_dir / "metadata.json", 'w') as f:
                 json.dump(metadata, f, indent=2)
+                
+    except Exception as e:
+        print(f"💥 배치 디스크 저장 오류: {e}")
 
-        except queue.Empty:
-            print("CPU Post-Processor 종료")
-            break
-        except Exception as e:
-            print(f"💥 CPU 후처리 오류: {e}")
 
-class OptimizedBatchProcessor:
-    """최적화된 배치 처리기 (CPU YOLO + GPU 배치 RTMW)"""
+class EnhancedBatchProcessor:
+    """향상된 배치 처리기 - 유연한 병렬화 지원"""
     
     def __init__(self, 
                  data_root: str = "data/1.Training",
@@ -663,9 +464,10 @@ class OptimizedBatchProcessor:
                  rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py", 
                  direction: str = "F",
                  item_types: List[str] = ["WORD"],
-                 num_cpu_workers: int = 4,
-                 yolo_device: str = 'cpu',  # 새로 추가
-                 inference_batch_size: int = 8):  # 새로 추가
+                 num_inference_workers: int = 2,  # 추론 워커 수
+                 num_postprocess_workers: int = 2,  # 후처리 워커 수
+                 yolo_device: str = "xpu",  # YOLO 디바이스
+                 pose_device: str = "xpu"):  # Pose 디바이스
         
         self.data_root = Path(data_root).resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -675,19 +477,26 @@ class OptimizedBatchProcessor:
         self.direction = direction.upper()
         self.item_types = [t.upper() for t in item_types]
         self.keypoint_scale = 8
-        self.num_cpu_workers = min(num_cpu_workers, os.cpu_count())
-        self.yolo_device = yolo_device  # CPU/GPU 선택
-        self.inference_batch_size = inference_batch_size  # 배치 크기
         
-        # 검증
+        # 워커 수 설정
+        self.num_inference_workers = max(1, num_inference_workers)
+        self.num_postprocess_workers = max(1, num_postprocess_workers)
+        self.yolo_device = yolo_device.lower()
+        self.pose_device = pose_device.lower()
+        
+        # 유효성 검사
         if self.direction not in {'F', 'U', 'L', 'R', 'D'}:
             raise ValueError(f"Invalid direction: {direction}")
         if set(self.item_types) - {'WORD', 'SEN'}:
             raise ValueError(f"Invalid item types: {set(self.item_types) - {'WORD', 'SEN'}}")
+        if self.yolo_device not in {'xpu', 'cpu'}:
+            raise ValueError(f"Invalid YOLO device: {yolo_device}")
+        if self.pose_device not in {'xpu', 'cpu'}:
+            raise ValueError(f"Invalid Pose device: {pose_device}")
 
         # 로깅 설정
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                            handlers=[logging.FileHandler('optimized_batch_processing.log'), logging.StreamHandler()])
+                            handlers=[logging.FileHandler('enhanced_batch_processing.log'), logging.StreamHandler()])
         self.logger = logging.getLogger(__name__)
         
         # 출력 디렉토리
@@ -696,13 +505,13 @@ class OptimizedBatchProcessor:
         self.video_output_dir.mkdir(parents=True, exist_ok=True)
         self.hdf5_output_dir.mkdir(parents=True, exist_ok=True)
         
-        self.logger.info("✅ 최적화된 배치 처리기 초기화 완료")
-        self.logger.info(f"   - YOLO 디바이스: {yolo_device}")
-        self.logger.info(f"   - 추론 배치 크기: {inference_batch_size}")
-        self.logger.info(f"   - CPU 워커 수: {self.num_cpu_workers}")
+        self.logger.info("✅ 향상된 배치 처리기 초기화 완료")
+        self.logger.info(f"   - 추론 워커 수: {self.num_inference_workers}")
+        self.logger.info(f"   - 후처리 워커 수: {self.num_postprocess_workers}")
+        self.logger.info(f"   - YOLO 디바이스: {self.yolo_device.upper()}")
+        self.logger.info(f"   - Pose 디바이스: {self.pose_device.upper()}")
 
     def extract_item_info(self, video_path: Path) -> Optional[Tuple[str, int]]:
-        """비디오 파일에서 아이템 정보 추출"""
         filename = video_path.stem
         for item_type in self.item_types:
             pattern = rf'_{item_type}(\d{{4}})_'
@@ -712,7 +521,6 @@ class OptimizedBatchProcessor:
         return None
 
     def collect_videos_by_folder(self) -> Dict[str, List[Tuple[str, int, str]]]:
-        """폴더별로 비디오 수집"""
         videos_base_dir = self.data_root / "videos"
         folder_video_data = {}
         if not videos_base_dir.exists():
@@ -738,7 +546,6 @@ class OptimizedBatchProcessor:
         return folder_video_data
 
     def create_batches_by_folder(self, folder_video_data: Dict[str, List[Tuple[str, int, str]]]) -> List[Dict]:
-        """폴더별로 배치 생성"""
         all_batches = []
         batch_counter = 0
         for folder_name, video_data in folder_video_data.items():
@@ -755,8 +562,8 @@ class OptimizedBatchProcessor:
         self.logger.info(f"📦 전체 {len(all_batches)}개 배치 생성 완료")
         return all_batches
 
-    def process_all_batches(self, cleanup_intermediate: bool = False):
-        """전체 배치 처리 (최적화된 파이프라인)"""
+    def process_all_batches_enhanced(self, cleanup_intermediate: bool = False):
+        """향상된 병렬 배치 처리"""
         folder_video_data = self.collect_videos_by_folder()
         if not folder_video_data:
             self.logger.error("❌ 처리할 영상이 없습니다")
@@ -770,56 +577,107 @@ class OptimizedBatchProcessor:
             self.logger.error("❌ 처리할 영상이 없습니다")
             return
 
-        self.logger.info(f"🚀 최적화된 파이프라인 시작 (YOLO: {self.yolo_device}, 배치: {self.inference_batch_size})")
+        self.logger.info(f"🚀 향상된 병렬 처리 시작: {len(all_videos)}개 영상")
 
-        # 프로세스 간 통신 큐
-        task_queue = mp.Queue()
+        # 1. 프로세스 간 통신 큐 생성
+        task_queue = mp.Queue(maxsize=self.num_inference_workers * 2)  # 큐 크기 제한
         result_queue = mp.Queue()
         
-        # 작업 큐에 모든 비디오 추가
-        for i, (item_type, item_id, video_path) in enumerate(all_videos):
-            task_queue.put((i, item_type, item_id, video_path))
-        
-        # 최적화된 추론 워커 시작 (CPU YOLO + GPU 배치 RTMW)
-        inference_worker = mp.Process(target=optimized_inference_worker, args=(
-            task_queue, result_queue, 
-            self.rtmw_model_name, self.rtmw_config_path,
-            self.yolo_device, self.inference_batch_size
-        ))
-        inference_worker.start()
+        # 2. 추론 워커 프로세스들 생성 및 시작
+        inference_workers = []
+        for i in range(self.num_inference_workers):
+            worker = mp.Process(
+                target=enhanced_gpu_inference_worker,
+                args=(task_queue, result_queue, i, self.rtmw_model_name, 
+                     self.rtmw_config_path, self.yolo_device, self.pose_device)
+            )
+            worker.start()
+            inference_workers.append(worker)
 
-        # CPU 후처리 워커 풀
-        postprocess_pool = mp.Pool(self.num_cpu_workers, cpu_postprocess_worker, (
-            result_queue, self.video_output_dir, self.keypoint_scale
-        ))
+        # 3. 후처리 워커 프로세스들 생성 및 시작
+        postprocess_workers = []
+        for i in range(self.num_postprocess_workers):
+            worker = mp.Process(
+                target=batch_postprocess_worker,
+                args=(result_queue, self.video_output_dir, self.keypoint_scale)
+            )
+            worker.start()
+            postprocess_workers.append(worker)
 
-        # 진행률 표시 및 결과 수집
+        # 4. 작업을 청크 단위로 나누어 작업 큐에 추가 (메모리 효율성)
+        def add_tasks_to_queue():
+            for i, (item_type, item_id, video_path) in enumerate(all_videos):
+                task_queue.put((i, item_type, item_id, video_path))
+            
+            # 추론 워커들에게 종료 신호
+            for _ in range(self.num_inference_workers):
+                task_queue.put(None)
+
+        # 작업 추가를 별도 스레드에서 수행
+        task_thread = threading.Thread(target=add_tasks_to_queue)
+        task_thread.start()
+
+        # 5. 진행률 표시 및 결과 수집
         successful_keys_map = {}
-        with tqdm(total=len(all_videos), desc="최적화된 비디오 처리") as pbar:
-            for _ in range(len(all_videos)):
-                job_id, item_type, item_id, video_path, arrays = result_queue.get()
-                if arrays:
-                    key = f"{item_type}{item_id:04d}"
-                    for batch_info in self.create_batches_by_folder(folder_video_data):
-                        if any(d[0] == item_type and d[1] == item_id for d in batch_info['data']):
-                            if batch_info['batch_id'] not in successful_keys_map:
-                                successful_keys_map[batch_info['batch_id']] = []
-                            successful_keys_map[batch_info['batch_id']].append(key)
-                            break
-                pbar.update(1)
-
-        # 워커 정리
-        task_queue.put(None)
-        for _ in range(self.num_cpu_workers):
-             result_queue.put(None)
-
-        inference_worker.join()
-        postprocess_pool.close()
-        postprocess_pool.join()
+        processed_videos = 0
         
-        self.logger.info("✅ 최적화된 비디오 처리 완료. HDF5 생성을 시작합니다.")
+        with tqdm(total=len(all_videos), desc="향상된 병렬 비디오 처리") as pbar:
+            # 모든 추론 워커가 종료될 때까지 기다리면서 진행률 업데이트
+            while processed_videos < len(all_videos):
+                try:
+                    # 짧은 타임아웃으로 논블로킹 체크
+                    job_id, item_type, item_id, video_path, arrays = result_queue.get(timeout=1)
+                    
+                    if arrays:  # 성공한 경우
+                        key = f"{item_type}{item_id:04d}"
+                        # 배치 매핑
+                        for batch_info in self.create_batches_by_folder(folder_video_data):
+                            if any(d[0] == item_type and d[1] == item_id for d in batch_info['data']):
+                                batch_id = batch_info['batch_id']
+                                if batch_id not in successful_keys_map:
+                                    successful_keys_map[batch_id] = []
+                                successful_keys_map[batch_id].append(key)
+                                break
+                    
+                    processed_videos += 1
+                    pbar.update(1)
+                    
+                except queue.Empty:
+                    # 워커들이 아직 살아있는지 확인
+                    alive_workers = [w for w in inference_workers if w.is_alive()]
+                    if not alive_workers and processed_videos < len(all_videos):
+                        self.logger.warning("⚠️ 모든 추론 워커가 종료되었지만 처리되지 않은 비디오가 있습니다.")
+                        break
+                    continue
+                except Exception as e:
+                    self.logger.error(f"💥 결과 수집 오류: {e}")
+                    processed_videos += 1
+                    pbar.update(1)
 
-        # HDF5 배치 생성
+        # 6. 모든 워커 정리
+        task_thread.join()
+        
+        # 추론 워커들 종료 대기
+        for worker in inference_workers:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                self.logger.warning(f"⚠️ 추론 워커 {worker.pid} 강제 종료")
+                worker.terminate()
+
+        # 후처리 워커들에게 종료 신호
+        for _ in range(self.num_postprocess_workers):
+            result_queue.put(None)
+
+        # 후처리 워커들 종료 대기
+        for worker in postprocess_workers:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                self.logger.warning(f"⚠️ 후처리 워커 {worker.pid} 강제 종료")
+                worker.terminate()
+
+        self.logger.info("✅ 모든 비디오 처리 완료. HDF5 생성을 시작합니다.")
+
+        # 7. HDF5 배치 생성
         all_batches = self.create_batches_by_folder(folder_video_data)
         for batch_info in tqdm(all_batches, desc="HDF5 배치 생성"):
             batch_id = batch_info['batch_id']
@@ -829,11 +687,11 @@ class OptimizedBatchProcessor:
                 if cleanup_intermediate:
                     self.cleanup_video_files(successful_keys, batch_info)
 
-        self.logger.info("🎉 최적화된 전체 배치 처리 완료!")
+        self.logger.info("🎉 향상된 전체 폴더별 배치 처리 완료!")
         self.print_final_statistics(all_batches)
 
     def create_hdf5_batch(self, successful_keys: List[str], batch_info: Dict):
-        """HDF5 배치 생성 (기존과 동일)"""
+        """HDF5 배치 파일 생성"""
         try:
             batch_id = batch_info['batch_id']
             folder_name = batch_info['folder_name']
@@ -850,7 +708,6 @@ class OptimizedBatchProcessor:
             with h5py.File(frames_h5_path, 'w') as f_frames, \
                  h5py.File(poses_h5_path, 'w') as f_poses:
                 
-                # HDF5 메타데이터 (기존과 동일한 구조 유지)
                 batch_metadata = {
                     'folder_name': folder_name,
                     'folder_batch_idx': folder_batch_idx,
@@ -858,8 +715,9 @@ class OptimizedBatchProcessor:
                     'item_types': self.item_types,
                     'direction': self.direction,
                     'video_count': len(successful_keys),
-                    'creation_time': str(datetime.now())
-                    # 최적화 관련 정보는 제거 (기존과 동일한 구조 유지)
+                    'creation_time': str(datetime.now()),
+                    'yolo_device': self.yolo_device,
+                    'pose_device': self.pose_device
                 }
                 f_frames.attrs.update(batch_metadata)
                 f_poses.attrs.update(batch_metadata)
@@ -900,7 +758,7 @@ class OptimizedBatchProcessor:
             self.logger.error(f"❌ 배치 {batch_info['batch_id']} HDF5 생성 실패: {e}", exc_info=True)
 
     def cleanup_video_files(self, keys: List[str], batch_info: Dict):
-        """중간 파일 정리"""
+        """중간 비디오 파일들 정리"""
         for key in keys:
             item_dir = self.video_output_dir / key
             if item_dir.exists():
@@ -908,7 +766,7 @@ class OptimizedBatchProcessor:
         self.logger.info(f"🧹 배치 {batch_info['batch_id']} 중간 파일 {len(keys)}개 정리 완료")
 
     def print_final_statistics(self, all_batches: List[Dict]):
-        """최종 통계 출력"""
+        """최종 처리 통계 출력"""
         folder_stats = {}
         for batch_info in all_batches:
             folder_name = batch_info['folder_name']
@@ -931,19 +789,20 @@ class OptimizedBatchProcessor:
             self.logger.info(f"📁 {folder_name}: {stats['batches']}개 배치, {stats['videos']}개 영상 ({types})")
             total_batches += stats['batches']
             total_videos += stats['videos']
+        
         self.logger.info("=" * 60)
         self.logger.info(f"🎯 전체: {total_batches}개 배치, {total_videos}개 영상")
-        self.logger.info(f"🔧 설정: YOLO({self.yolo_device}), 배치크기({self.inference_batch_size})")
+        self.logger.info(f"💻 사용 디바이스: YOLO={self.yolo_device.upper()}, Pose={self.pose_device.upper()}")
 
-    def process_test_batch(self, test_count: int = 5):
-        """테스트 배치 처리"""
-        self.logger.info("🧪 최적화된 테스트 모드 실행")
+    def process_test_batch_enhanced(self, test_count: int = 5):
+        """향상된 테스트용 배치 처리"""
+        self.logger.info("🧪 향상된 테스트 모드 시작")
         
-        processor = OptimizedVideoProcessor(
+        processor = EnhancedStreamlinedVideoProcessor(
             rtmw_model_name=self.rtmw_model_name,
             rtmw_config_path=self.rtmw_config_path,
             yolo_device=self.yolo_device,
-            batch_size=self.inference_batch_size
+            pose_device=self.pose_device
         )
         
         folder_video_data = self.collect_videos_by_folder()
@@ -954,7 +813,7 @@ class OptimizedBatchProcessor:
         test_folder = list(folder_video_data.keys())[0]
         video_data = folder_video_data[test_folder][:test_count]
         
-        self.logger.info(f"🧪 테스트 배치 처리 [{test_folder}] ({len(video_data)}개)")
+        self.logger.info(f"🧪 테스트 배치 처리 시작 [{test_folder}] ({len(video_data)}개)")
         
         batch_info = {
             'batch_id': 999, 'folder_name': test_folder, 'folder_batch_idx': 0,
@@ -963,21 +822,75 @@ class OptimizedBatchProcessor:
         }
         
         successful_keys = []
-        for item_type, item_id, video_path in tqdm(video_data, desc="최적화 테스트"):
-            success = processor.process_video(item_type, item_id, video_path, self.video_output_dir)
+        for item_type, item_id, video_path in tqdm(video_data, desc="테스트 처리"):
+            success = self._process_single_video(processor, item_type, item_id, video_path)
             if success:
                 successful_keys.append(f"{item_type}{item_id:04d}")
         
         if successful_keys:
             self.create_hdf5_batch(successful_keys, batch_info)
-            self.logger.info("✅ 최적화된 테스트 배치 완료")
+            self.logger.info("✅ 테스트 배치 HDF5 생성 완료.")
+
+    def _process_single_video(self, processor: EnhancedStreamlinedVideoProcessor, 
+                             item_type: str, item_id: int, video_path: str) -> bool:
+        """단일 비디오 처리 (테스트용)"""
+        try:
+            self.logger.info(f"🎬 처리 중: {item_type}{item_id:04d} - {Path(video_path).name}")
+            start_time = time.time()
+            
+            arrays = processor.process_video_to_arrays(video_path)
+            if arrays is None:
+                return False
+            
+            processing_time = time.time() - start_time
+            
+            item_dir = self.video_output_dir / f"{item_type}{item_id:04d}"
+            item_dir.mkdir(parents=True, exist_ok=True)
+            
+            jpeg_frames_dict = {f'frame_{i}': frame for i, frame in enumerate(arrays['jpeg_frames'])}
+            np.savez_compressed(item_dir / "crop_images_jpeg.npz", **jpeg_frames_dict)
+
+            keypoints_scaled = np.round(arrays['keypoints'] * self.keypoint_scale).astype(np.int32)
+            np.save(item_dir / "keypoints_scaled.npy", keypoints_scaled)
+            np.save(item_dir / "scores.npy", arrays['scores'])
+            
+            metadata = {
+                'item_type': item_type,
+                'item_id': item_id,
+                'video_path': str(video_path),
+                'video_filename': Path(video_path).name,
+                'frame_count': arrays['frame_count'],
+                'processing_time': processing_time,
+                'shape_info': {
+                    'frame_count': arrays['frame_count'],
+                    'keypoints_scaled': list(keypoints_scaled.shape),
+                    'scores': list(arrays['scores'].shape)
+                },
+                'keypoint_scale': self.keypoint_scale,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'yolo_device': self.yolo_device,
+                'pose_device': self.pose_device
+            }
+            
+            with open(item_dir / "metadata.json", 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            self.logger.info(f"✅ {item_type}{item_id:04d} 완료: {arrays['frame_count']}프레임, {processing_time:.2f}초")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"❌ {item_type}{item_id:04d} 처리 실패: {e}")
+            return False
+
 
 def main():
-    """메인 실행 함수 (최적화된 버전)"""
+    """메인 실행 함수 (향상된 병렬 처리 옵션)"""
+    # 필수: multiprocessing 시작 방식을 'spawn'으로 설정
     mp.set_start_method('spawn', force=True)
 
-    print("🚀 최적화된 스트림라인 배치 처리기 (CPU YOLO + GPU 배치 RTMW)")
-    print("=" * 70)
+    print("🚀 향상된 스트림라인 배치 처리기 (WORD + SEN 지원)")
+    print("   ✨ 배치 병렬화 + YOLO CPU 옵션 지원")
+    print("=" * 60)
     
     # 아이템 타입 선택
     print("\n처리할 아이템 타입을 선택하세요:")
@@ -998,82 +911,85 @@ def main():
 
     # 방향 선택
     print("\n처리할 방향을 선택하세요:")
-    print("1. F (Front, 정면) - 기본값")
-    print("2. U (Up, 위)\n3. L (Left, 왼쪽)\n4. R (Right, 오른쪽)\n5. D (Down, 아래)")
+    print("1. F (Front, 정면) - 기본값\n2. U (Up, 위)\n3. L (Left, 왼쪽)\n4. R (Right, 오른쪽)\n5. D (Down, 아래)")
     
     direction_choice = input("방향 선택 (1-5, 기본값: 1): ").strip()
     direction_map = {'1': 'F', '2': 'U', '3': 'L', '4': 'R', '5': 'D', '': 'F'}
     direction = direction_map.get(direction_choice, 'F')
     print(f"✅ 선택된 방향: {direction}")
     
-    # YOLO 디바이스 선택 (새로 추가!)
-    print("\n🔥 YOLO 실행 디바이스를 선택하세요:")
-    print("1. CPU (안정적, 메모리 절약)")
-    print("2. GPU (빠름, 메모리 많이 사용) - 기본값")
+    # +++ 새로운 디바이스 설정 옵션 +++
+    print("\n🔧 디바이스 설정:")
+    print("1. GPU 전체 사용 (YOLO: GPU, Pose: GPU) - 기본값, 최고 성능")
+    print("2. 하이브리드 (YOLO: CPU, Pose: GPU) - GPU 메모리 절약")
+    print("3. CPU 전체 사용 (YOLO: CPU, Pose: CPU) - GPU 없을 때")
     
-    yolo_device_choice = input("YOLO 디바이스 (1-2, 기본값: 2): ").strip()
-    yolo_device_map = {'1': 'cpu', '2': 'xpu', '': 'xpu'}
-    yolo_device = yolo_device_map.get(yolo_device_choice, 'xpu')
-    print(f"✅ YOLO 디바이스: {yolo_device}")
+    device_choice = input("디바이스 선택 (1-3, 기본값: 1): ").strip()
+    device_map = {
+        '1': ('xpu', 'xpu'),
+        '2': ('cpu', 'xpu'),
+        '3': ('cpu', 'cpu'),
+        '': ('xpu', 'xpu')
+    }
+    yolo_device, pose_device = device_map.get(device_choice, ('xpu', 'xpu'))
+    print(f"✅ 디바이스 설정: YOLO={yolo_device.upper()}, Pose={pose_device.upper()}")
     
-    # 추론 배치 크기 선택 (새로 추가!)
-    print("\n⚡ 추론 배치 크기를 선택하세요:")
-    print("1. 작음 (4) - 메모리 부족 시")
-    print("2. 중간 (8) - 기본값")  
-    print("3. 큼 (16) - 고성능 GPU")
-    print("4. 매우 큼 (32) - 최고 성능")
+    # 워커 수 설정
+    default_inference_workers = 2 if yolo_device == 'xpu' else min(4, os.cpu_count())
+    default_postprocess_workers = max(2, os.cpu_count() // 4)
     
-    batch_choice = input("배치 크기 (1-4, 기본값: 2): ").strip()
-    batch_map = {'1': 4, '2': 8, '3': 16, '4': 32, '': 8}
-    inference_batch_size = batch_map.get(batch_choice, 8)
-    print(f"✅ 추론 배치 크기: {inference_batch_size}")
+    print(f"\n🔧 병렬 처리 설정:")
+    inference_input = input(f"추론 워커 수 (기본값: {default_inference_workers}): ").strip()
+    postprocess_input = input(f"후처리 워커 수 (기본값: {default_postprocess_workers}): ").strip()
     
-    # CPU 워커 수
-    default_cpu_workers = max(1, os.cpu_count() // 2)
-    cpu_workers_input = input(f"\n사용할 CPU 워커 수 (기본값: {default_cpu_workers}): ").strip()
     try:
-        num_cpu_workers = int(cpu_workers_input) if cpu_workers_input else default_cpu_workers
+        num_inference_workers = int(inference_input) if inference_input else default_inference_workers
+        num_postprocess_workers = int(postprocess_input) if postprocess_input else default_postprocess_workers
     except ValueError:
-        num_cpu_workers = default_cpu_workers
-    print(f"✅ CPU 워커 수: {num_cpu_workers}")
+        num_inference_workers = default_inference_workers
+        num_postprocess_workers = default_postprocess_workers
+    
+    print(f"✅ 워커 설정: 추론={num_inference_workers}개, 후처리={num_postprocess_workers}개")
 
-    # 최적화된 배치 처리기 초기화
-    print("\n📥 최적화된 모델 초기화 중...")
+    # 배치 처리기 초기화
+    print("\n📥 향상된 모델 확인 및 초기화 중...")
     try:
-        batch_processor = OptimizedBatchProcessor(
+        batch_processor = EnhancedBatchProcessor(
             rtmw_model_name=rtmw_model_name, 
             direction=direction,
             item_types=item_types,
-            num_cpu_workers=num_cpu_workers,
+            num_inference_workers=num_inference_workers,
+            num_postprocess_workers=num_postprocess_workers,
             yolo_device=yolo_device,
-            inference_batch_size=inference_batch_size
+            pose_device=pose_device
         )
-        print("✅ 최적화된 초기화 완료!")
+        print("✅ 초기화 완료!")
     except Exception as e:
         print(f"❌ 초기화 실패: {e}")
         return
-
+    
     choice = '3'  # 기본값
 
     while True:
-        print("\n🚀 최적화된 처리 모드를 선택하세요:")
+        print("\n🚀 향상된 처리 모드를 선택하세요 (기본값: 3):")
         print("1. 테스트 처리 (5개 영상)")
-        print("2. 전체 최적화 처리")
-        print("3. 전체 최적화 처리 + 중간파일 정리 (기본값)")
+        print("2. 향상된 병렬 처리")
+        print("3. 향상된 병렬 처리 + 중간파일 정리 (권장)")
         print("4. 영상 목록만 확인")
-        print("5. 최적화 설정 확인")
+        print("5. 모델 및 디바이스 정보 확인")
         print("0. 종료")
         
-        user_input = input(f"선택 (0-5, Enter 시 '{choice}' 실행): ").strip()
+        user_input = input(f"선택 (0-5, Enter 입력 시 '{choice}' 실행): ").strip()
+        
         if user_input:
             choice = user_input
         
         if choice == '1':
-            batch_processor.process_test_batch(test_count=5)
+            batch_processor.process_test_batch_enhanced(test_count=5)
         elif choice == '2':
-            batch_processor.process_all_batches(cleanup_intermediate=False)
+            batch_processor.process_all_batches_enhanced(cleanup_intermediate=False)
         elif choice == '3':
-            batch_processor.process_all_batches(cleanup_intermediate=True)
+            batch_processor.process_all_batches_enhanced(cleanup_intermediate=True)
         elif choice == '4':
             folder_video_data = batch_processor.collect_videos_by_folder()
             total_videos = sum(len(videos) for videos in folder_video_data.values())
@@ -1083,41 +999,54 @@ def main():
                 for item_type, _, _ in videos:
                     type_counts[item_type] = type_counts.get(item_type, 0) + 1
             type_stats = ", ".join([f"{t}:{c}개" for t, c in type_counts.items()])
-            print(f"\n📊 총 {total_videos}개 {direction} 방향 영상 ({type_stats}):")
+            print(f"\n📊 총 {total_videos}개 {direction} 방향 영상 발견 ({type_stats}):")
             
             for folder_name, video_data in list(folder_video_data.items())[:3]:
-                print(f"  📁 {folder_name}: {len(video_data)}개")
-                for i, (item_type, item_id, video_path) in enumerate(video_data[:3]):
-                    print(f"    {i+1}. {item_type}{item_id:04d} - {Path(video_path).name}")
-                if len(video_data) > 3:
-                    print(f"    ... 외 {len(video_data) - 3}개")
-            
-        elif choice == '5':
-            print(f"\n📋 현재 최적화 설정:")
-            print(f"  🎯 처리 타입: {', '.join(item_types)}")
-            print(f"  🤖 RTMW 모델: {rtmw_model_name}")
-            print(f"  🔍 YOLO 디바이스: {yolo_device}")
-            print(f"  ⚡ 추론 배치 크기: {inference_batch_size}")
-            print(f"  🖥️ CPU 워커 수: {num_cpu_workers}")
-            print(f"  📍 처리 방향: {direction}")
-            
-            # 성능 예측 정보
-            if yolo_device == 'cpu':
-                print(f"\n💡 성능 예측:")
-                print(f"  - CPU YOLO: 안정적이지만 느림")
-                print(f"  - GPU 배치 RTMW: 높은 처리량")
-                print(f"  - 메모리 사용량: 중간 수준")
-            else:
-                print(f"\n💡 성능 예측:")
-                print(f"  - GPU YOLO: 빠르지만 메모리 사용")
-                print(f"  - GPU 배치 RTMW: 최고 성능")
-                print(f"  - 메모리 사용량: 높음")
+                folder_type_counts = {}
+                for item_type, _, _ in video_data:
+                    folder_type_counts[item_type] = folder_type_counts.get(item_type, 0) + 1
                 
+                folder_type_stats = ", ".join([f"{t}:{c}" for t, c in folder_type_counts.items()])
+                print(f"  📁 {folder_name}: {len(video_data)}개 ({folder_type_stats})")
+                
+                for i, (item_type, item_id, video_path) in enumerate(video_data[:5]):
+                    print(f"    {i+1}. {item_type}{item_id:04d} - {Path(video_path).name}")
+                if len(video_data) > 5:
+                    print(f"    ... 외 {len(video_data) - 5}개")
+            
+            if len(folder_video_data) > 3:
+                remaining_folders = len(folder_video_data) - 3
+                remaining_videos = sum(len(videos) for videos in list(folder_video_data.values())[3:])
+                print(f"  ... 외 {remaining_folders}개 폴더 ({remaining_videos}개 영상)")
+                
+        elif choice == '5':
+            print(f"\n📋 현재 설정 정보:")
+            print(f"  - 처리 타입: {', '.join(item_types)}")
+            print(f"  - RTMW 모델: {rtmw_model_name}")
+            print(f"  - YOLO 모델: {YOLO_MODEL_CONFIG['filename']}")
+            print(f"  - 처리 방향: {direction}")
+            print(f"  - 디바이스 설정: YOLO={yolo_device.upper()}, Pose={pose_device.upper()}")
+            print(f"  - 워커 설정: 추론={num_inference_workers}개, 후처리={num_postprocess_workers}개")
+            print(f"  - 모델 디렉토리: {MODELS_DIR}")
+            
+            # 모델 파일 존재 확인
+            yolo_path = Path(MODELS_DIR) / YOLO_MODEL_CONFIG["filename"]
+            print(f"  - YOLO 파일 존재: {'✅' if yolo_path.exists() else '❌'}")
+            
+            for config in RTMW_MODEL_OPTIONS:
+                if rtmw_model_name in config["filename"]:
+                    rtmw_path = Path(config["path"])
+                    print(f"  - RTMW 파일 존재: {'✅' if rtmw_path.exists() else '❌'}")
+                    if rtmw_path.exists():
+                        size_mb = rtmw_path.stat().st_size / (1024*1024)
+                        print(f"    크기: {size_mb:.1f} MB")
+                    break
         elif choice == '0':
-            print("👋 최적화된 처리기를 종료합니다.")
+            print("👋 종료합니다.")
             break
         else:
             print("❌ 잘못된 선택입니다.")
+
 
 if __name__ == "__main__":
     main()
