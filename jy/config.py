@@ -59,6 +59,28 @@ RTMW_MODEL_OPTIONS = [
     }
 ]
 
+# ONNX 모델 옵션들 (새로 추가)
+RTMW_ONNX_MODEL_OPTIONS = [
+    {
+        "filename": "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+        "path": os.path.join(MODELS_DIR, "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"),
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+        "description": "RTMW-L 384x288 ONNX (최적화된 추론 성능)",
+        "input_size": (288, 384),  # ONNX 모델의 실제 입력 크기 (W, H)
+        "keypoints": 133,
+        "md5": "6708b5b97b65d476b982a6e8b2fc56e1"
+    },
+    {
+        "filename": "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx", 
+        "path": os.path.join(MODELS_DIR, "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"),
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+        "description": "RTMW-X 384x288 ONNX (최고 성능)",
+        "input_size": (288, 384),
+        "keypoints": 133,
+        "md5": "a0e92de8b8e9b0b5f8d8f7a6c1b2e3d4"  # 예시 MD5 (실제 값 필요)
+    }
+]
+
 # 편의성을 위한 별칭들
 YOLO_MODEL_FILENAME = YOLO_MODEL_CONFIG["filename"]
 YOLO_MODEL_PATH = YOLO_MODEL_CONFIG["path"]

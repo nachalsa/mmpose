@@ -9,6 +9,9 @@ import torch
 import cv2
 import numpy as np
 import time
+import urllib.request
+import hashlib
+from pathlib import Path
 from typing import List, Tuple, Optional
 from collections import deque
 import onnxruntime as ort
@@ -19,6 +22,79 @@ try:
 except ImportError:
     print("⚠️ ultralytics 미설치 - pip install ultralytics")
     YOLO_AVAILABLE = False
+
+# 모델 다운로드 관련 상수
+MODEL_URLS = {
+    "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx": {
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+        "md5": "6708b5b97b65d476b982a6e8b2fc56e1"
+    }
+}
+
+def download_file_with_progress(url: str, filepath: str, expected_md5: str = None):
+    """진행률 표시하면서 파일 다운로드"""
+    print(f"📥 다운로드 중: {os.path.basename(filepath)}")
+    print(f"   URL: {url}")
+    
+    def show_progress(block_num, block_size, total_size):
+        downloaded = block_num * block_size
+        if total_size > 0:
+            percent = min(downloaded * 100.0 / total_size, 100.0)
+            downloaded_mb = downloaded / (1024 * 1024)
+            total_mb = total_size / (1024 * 1024)
+            print(f"\r   진행률: {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='')
+    
+    try:
+        # 디렉토리 생성
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # 파일 다운로드
+        urllib.request.urlretrieve(url, filepath, show_progress)
+        print()  # 새 줄
+        
+        # MD5 체크섬 확인
+        if expected_md5:
+            print("   MD5 체크섬 확인 중...")
+            with open(filepath, 'rb') as f:
+                file_hash = hashlib.md5(f.read()).hexdigest()
+            
+            if file_hash != expected_md5:
+                os.remove(filepath)
+                raise ValueError(f"MD5 체크섬 불일치: 예상({expected_md5}) != 실제({file_hash})")
+            print("   ✅ MD5 체크섬 확인 완료")
+        
+        print(f"✅ 다운로드 완료: {os.path.basename(filepath)}")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ 다운로드 실패: {e}")
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        return False
+
+def ensure_model_exists(model_path: str, model_name: str = None) -> bool:
+    """모델 파일 존재 확인 및 자동 다운로드"""
+    if os.path.exists(model_path):
+        print(f"✅ 모델 파일 존재: {os.path.basename(model_path)}")
+        return True
+    
+    if model_name is None:
+        model_name = os.path.basename(model_path)
+    
+    # 알려진 모델인지 확인
+    if model_name in MODEL_URLS:
+        model_info = MODEL_URLS[model_name]
+        print(f"🔍 모델 자동 다운로드 시작: {model_name}")
+        
+        return download_file_with_progress(
+            model_info["url"], 
+            model_path, 
+            model_info.get("md5")
+        )
+    else:
+        print(f"❌ 알 수 없는 모델: {model_name}")
+        print(f"   수동으로 다운로드하여 다음 경로에 저장하세요: {model_path}")
+        return False
 
 def get_available_providers():
     """사용 가능한 ONNX 실행 제공자 확인"""
@@ -145,12 +221,30 @@ class YOLO11LRTMWONNXInferencer:
         start_time = time.time()
         
         try:
-            # YOLO11L 모델 로드
-            model_path = os.path.join("../models", self.yolo_model_name)
+            # 모델 디렉토리 생성
+            models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
+            os.makedirs(models_dir, exist_ok=True)
+            
+            # YOLO11L 모델 경로
+            model_path = os.path.join(models_dir, self.yolo_model_name)
+            
+            # 모델 파일 존재 확인
             if not os.path.exists(model_path):
-                print(f"📥 YOLO11L 모델 다운로드 중: {self.yolo_model_name}")
-                
-            self.detection_model = YOLO(model_path)
+                print(f"📥 YOLO11L 모델 자동 다운로드 중: {self.yolo_model_name}")
+                print("   (Ultralytics에서 자동으로 다운로드됩니다)")
+            
+            # YOLO 모델 로드 (자동 다운로드 포함)
+            self.detection_model = YOLO(self.yolo_model_name)
+            
+            # 모델을 지정된 위치에 복사 (다음에 더 빠른 로딩을 위해)
+            if not os.path.exists(model_path) and hasattr(self.detection_model, 'ckpt_path'):
+                try:
+                    import shutil
+                    if os.path.exists(self.detection_model.ckpt_path):
+                        shutil.copy2(self.detection_model.ckpt_path, model_path)
+                        print(f"💾 모델 복사됨: {model_path}")
+                except Exception as e:
+                    print(f"⚠️ 모델 복사 실패 (정상 작동): {e}")
             
             # 디바이스 설정
             if self.detection_device != "cpu":
@@ -176,6 +270,16 @@ class YOLO11LRTMWONNXInferencer:
         start_time = time.time()
         
         try:
+            # 모델 파일 존재 확인 및 자동 다운로드
+            model_name = os.path.basename(self.rtmw_onnx_path)
+            if not ensure_model_exists(self.rtmw_onnx_path, model_name):
+                # 기본 경로에서도 시도
+                default_path = os.path.join(os.path.dirname(__file__), "..", "models", model_name)
+                if not ensure_model_exists(default_path, model_name):
+                    raise FileNotFoundError(f"RTMW-L ONNX 모델을 찾을 수 없습니다: {self.rtmw_onnx_path}")
+                else:
+                    self.rtmw_onnx_path = default_path
+            
             # ONNX 세션 옵션 설정
             sess_options = ort.SessionOptions()
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -581,8 +685,27 @@ class YOLO11LRTMWONNXInferencer:
 
 def main():
     """메인 테스트 함수"""
-    # 모델 경로 설정
-    rtmw_onnx_path = "../models/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"
+    # 모델 경로 설정 - 여러 가능한 경로 확인
+    models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
+    rtmw_model_name = "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"
+    
+    # 가능한 모델 경로들
+    possible_paths = [
+        os.path.join(models_dir, rtmw_model_name),
+        os.path.join("../models", rtmw_model_name),
+        os.path.join("models", rtmw_model_name),
+        rtmw_model_name  # 현재 디렉토리
+    ]
+    
+    rtmw_onnx_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            rtmw_onnx_path = path
+            break
+    
+    # 모델이 없으면 기본 경로 사용 (자동 다운로드됨)
+    if rtmw_onnx_path is None:
+        rtmw_onnx_path = possible_paths[0]  # 첫 번째 경로 사용
     
     try:
         print("🚀 YOLO11L + RTMW-L ONNX 하이브리드 추론기 테스트")
@@ -599,13 +722,40 @@ def main():
             optimize_for_accuracy=True
         )
         
-        # 테스트 이미지
-        test_image = "winter01.jpg"
-        inferencer.test_single_image(test_image)
+        # 테스트 이미지 - 여러 가능한 경로 확인
+        test_image_names = ["winter01.jpg", "test.jpg", "demo.jpg", "sample.jpg"]
+        test_image = None
+        
+        for img_name in test_image_names:
+            possible_img_paths = [
+                img_name,  # 현재 디렉토리
+                os.path.join("../demo/resources", img_name),
+                os.path.join("demo/resources", img_name),
+                os.path.join("resources", img_name)
+            ]
+            
+            for img_path in possible_img_paths:
+                if os.path.exists(img_path):
+                    test_image = img_path
+                    break
+            
+            if test_image:
+                break
+        
+        if test_image:
+            inferencer.test_single_image(test_image)
+        else:
+            print("⚠️ 테스트 이미지를 찾을 수 없습니다. 웹캠 테스트만 진행합니다.")
+            print("   테스트 이미지를 준비하려면 다음 중 하나를 현재 디렉토리에 저장하세요:")
+            for img_name in test_image_names:
+                print(f"   - {img_name}")
         
         # 실시간 웹캠 테스트
         print(f"\n🎥 YOLO11L + RTMW-L ONNX 실시간 웹캠 테스트를 시작하시겠습니까? (y/n): ", end="")
-        choice = input().strip().lower()
+        try:
+            choice = input().strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            choice = 'n'
         
         if choice == 'y':
             inferencer.test_webcam()
@@ -616,6 +766,7 @@ def main():
         print(f"   📐 최적 입력: YOLO 832px, RTMW-L 384x288")
         print(f"   ⚡ ONNX 가속: OpenVINO/CUDA/DirectML 활용")
         print(f"   💨 빠른 추론: ONNX Runtime 최적화")
+        print(f"   📥 자동 다운로드: 필요한 모델 자동 설치")
         
     except Exception as e:
         print(f"❌ 테스트 실패: {e}")

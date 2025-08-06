@@ -7,6 +7,13 @@ uv pip install opencv-python-headless h5py tqdm
 uv pip install mmdet mmengine
 pip install mmcv==2.1.0
 uv pip install ultralytics
+# ONNX 추론기를 위한 추가 의존성
+uv pip install onnxruntime-gpu  # GPU 가속을 위한 ONNX Runtime
+uv pip install onnxruntime      # CPU 폴백용 ONNX Runtime  
+uv pip install onnx             # ONNX 모델 처리
+uv pip install Pillow          # 이미지 처리
+uv pip install requests         # 모델 다운로드용
 python -m pip install -e .
 cd jy
-python stream_processor.py
+# ONNX 추론기 실행 (또는 원하는 스크립트로 변경)
+python onnx_inferencer.py
