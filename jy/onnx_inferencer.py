@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-YOLO11L + RTMW ONNX 하이브리드 추론기
-YOLO11L로 사람 검출 + RTMW ONNX로 포즈 추정
+YOLO11L + RTMW-L ONNX 하이브리드 추론기
+Large 모델을 사용한 고정확도 사람 검출 + ONNX 포즈 추정
 """
 
 import os
+import torch
 import cv2
 import numpy as np
 import time
@@ -19,50 +20,67 @@ except ImportError:
     print("⚠️ ultralytics 미설치 - pip install ultralytics")
     YOLO_AVAILABLE = False
 
-class YOLO11LONNXRTMWHybridInferencer:
-    """YOLO11L + RTMW ONNX 하이브리드 추론기"""
+def get_available_providers():
+    """사용 가능한 ONNX 실행 제공자 확인"""
+    available = ort.get_available_providers()
+    print(f"🔧 사용 가능한 ONNX Providers: {', '.join(available)}")
+    return available
+
+def select_best_provider():
+    """최적의 ONNX 실행 제공자 선택"""
+    available = get_available_providers()
+    
+    # 우선순위: OpenVINO > CUDA > DirectML > CPU
+    priority_order = [
+        'OpenVINOExecutionProvider',    # Intel GPU/CPU 최적화
+        'CUDAExecutionProvider',        # NVIDIA GPU
+        'DmlExecutionProvider',         # DirectML (Windows GPU)
+        'CPUExecutionProvider'          # CPU 폴백
+    ]
+    
+    for provider in priority_order:
+        if provider in available:
+            print(f"✅ 선택된 ONNX Provider: {provider}")
+            return provider
+    
+    return 'CPUExecutionProvider'
+
+class YOLO11LRTMWONNXInferencer:
+    """YOLO11L + RTMW-L ONNX 하이브리드 추론기"""
     
     def __init__(self, 
                  rtmw_onnx_path: str,
                  detection_device: str = "auto",
-                 onnx_providers: List[str] = None,
-                 input_size: Tuple[int, int] = (288, 384),  # (H, W)
+                 pose_device: str = "auto",
                  optimize_for_accuracy: bool = True):
         """
         Args:
-            rtmw_onnx_path: RTMW ONNX 모델 파일 경로
-            detection_device: 검출 디바이스 ('auto', 'cpu', 'cuda')
-            onnx_providers: ONNX Runtime 프로바이더 리스트
-            input_size: RTMW 입력 크기 (H, W)
+            rtmw_onnx_path: RTMW-L ONNX 모델 경로
+            detection_device: 검출 디바이스 ('auto', 'cpu', 'cuda', 'xpu')
+            pose_device: 포즈 추정 디바이스 ('auto', 'cpu', 'cuda', 'openvino')
             optimize_for_accuracy: 정확도 최적화 여부
         """
         if not YOLO_AVAILABLE:
             raise ImportError("ultralytics가 필요합니다: pip install ultralytics")
-        
+            
         self.rtmw_onnx_path = rtmw_onnx_path
-        self.yolo_model_name = "yolo11l.pt"
-        self.input_size = input_size
+        self.yolo_model_name = "yolo11l.pt"  # Large 모델 사용
         self.optimize_for_accuracy = optimize_for_accuracy
         
-        # 디바이스 설정
-        self.detection_device = self._determine_yolo_device(detection_device)
+        # 디바이스 결정
+        self.detection_device = self._determine_detection_device(detection_device)
+        self.pose_provider = self._determine_pose_provider(pose_device)
         
-        # ONNX Runtime 프로바이더 설정
-        if onnx_providers is None:
-            self.onnx_providers = self._get_available_providers()
-        else:
-            self.onnx_providers = onnx_providers
-        
-        print(f"🚀 YOLO11L + RTMW ONNX 하이브리드 추론기 초기화:")
-        print(f"   - YOLO 모델: YOLO11L (디바이스: {self.detection_device})")
-        print(f"   - RTMW ONNX: {os.path.basename(rtmw_onnx_path)}")
-        print(f"   - ONNX 프로바이더: {self.onnx_providers}")
-        print(f"   - 입력 크기: {input_size}")
+        print(f"🚀 YOLO11L + RTMW-L ONNX 하이브리드 추론기 초기화:")
+        print(f"   - YOLO 모델: YOLO11L (Large - 고정확도)")
+        print(f"   - RTMW 모델: RTMW-L 384x288 ONNX")
+        print(f"   - 검출 디바이스: {self.detection_device}")
+        print(f"   - 포즈 Provider: {self.pose_provider}")
         print(f"   - 정확도 최적화: {'ON' if optimize_for_accuracy else 'OFF'}")
         
         # 모델 초기화
         self._init_detection_model()
-        self._init_pose_onnx_model()
+        self._init_pose_model()
         
         # 성능 통계
         self.inference_times = {
@@ -74,45 +92,44 @@ class YOLO11LONNXRTMWHybridInferencer:
         # 최적화 설정
         self._setup_optimization()
         
-        # RTMW 키포인트 정보
-        self._setup_keypoint_info()
-    
-    def _determine_yolo_device(self, device: str) -> str:
-        """YOLO 디바이스 결정"""
+    def _determine_detection_device(self, device: str) -> str:
+        """검출 디바이스 자동 결정"""
         if device == "auto":
-            available_providers = ort.get_available_providers()
-            if "CUDAExecutionProvider" in available_providers:
+            if torch.cuda.is_available():
                 return "cuda"
             else:
                 return "cpu"
         return device
     
-    def _get_available_providers(self) -> List[str]:
-        """사용 가능한 ONNX Runtime 프로바이더 확인"""
-        available = ort.get_available_providers()
-        
-        # 우선순위: CUDA > CPU
-        preferred_order = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        providers = []
-        
-        for provider in preferred_order:
-            if provider in available:
-                providers.append(provider)
-        
-        print(f"🔍 사용 가능한 ONNX 프로바이더: {available}")
-        print(f"🎯 선택된 프로바이더: {providers}")
-        
-        return providers
+    def _determine_pose_provider(self, device: str) -> str:
+        """포즈 추정 Provider 자동 결정"""
+        if device == "auto":
+            return select_best_provider()
+        elif device == "openvino":
+            return 'OpenVINOExecutionProvider'
+        elif device == "cuda":
+            return 'CUDAExecutionProvider'
+        elif device == "directml":
+            return 'DmlExecutionProvider'
+        else:
+            return 'CPUExecutionProvider'
     
     def _setup_optimization(self):
-        """최적화 설정"""
+        """최적화 설정 - 정확도 우선"""
         if self.optimize_for_accuracy:
+            print("🎯 정확도 최적화 설정 적용 중...")
+            
             # YOLO11L 정확도 우선 파라미터
-            self.yolo_conf_thresh = 0.4
-            self.yolo_iou_thresh = 0.6
-            self.yolo_max_det = 50
-            self.yolo_classes = [0]  # 사람만
-            self.detection_img_size = 832
+            self.yolo_conf_thresh = 0.4     # 낮은 신뢰도 (더 많은 검출)
+            self.yolo_iou_thresh = 0.6      # 적당한 IoU 임계값
+            self.yolo_max_det = 50          # 더 많은 검출 허용
+            self.yolo_classes = [0]         # 사람 클래스만
+            
+            # 이미지 크기 최적화
+            self.detection_img_size = 832   # Large 모델에 적합한 큰 입력 크기
+            self.pose_input_size = (288, 384)  # RTMW-L 384x288 입력 크기
+            
+            print("✅ 정확도 최적화 설정 완료")
         else:
             # 균형 설정
             self.yolo_conf_thresh = 0.5
@@ -120,76 +137,101 @@ class YOLO11LONNXRTMWHybridInferencer:
             self.yolo_max_det = 100
             self.yolo_classes = None
             self.detection_img_size = 640
-    
-    def _setup_keypoint_info(self):
-        """RTMW 키포인트 정보 설정"""
-        # RTMW는 133개 키포인트 (전신 + 얼굴 + 손)
-        self.num_keypoints = 133
-        
-        # 주요 신체 부위 키포인트 인덱스 (COCO 기반)
-        self.body_keypoints = list(range(17))  # 0-16: 신체
-        self.face_keypoints = list(range(17, 17+68))  # 17-84: 얼굴
-        self.left_hand_keypoints = list(range(17+68, 17+68+21))  # 85-105: 왼손
-        self.right_hand_keypoints = list(range(17+68+21, 133))  # 106-126: 오른손
-        
-        # 신체 연결 정보 (그리기용)
-        self.body_connections = [
-            (0, 1), (0, 2), (1, 3), (2, 4),  # 머리
-            (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),  # 팔
-            (5, 11), (6, 12), (11, 12),  # 몸통
-            (11, 13), (13, 15), (12, 14), (14, 16)  # 다리
-        ]
+            self.pose_input_size = (288, 384)
     
     def _init_detection_model(self):
         """YOLO11L 검출 모델 초기화"""
-        print(f"🔧 YOLO11L 검출 모델 로딩 중...")
+        print(f"🔧 YOLO11L 검출 모델 로딩 중... (디바이스: {self.detection_device})")
+        start_time = time.time()
+        
         try:
-            self.detection_model = YOLO(self.yolo_model_name)
-            self.detection_model.to(self.detection_device)
-            print(f"✅ YOLO11L 로딩 완료")
+            # YOLO11L 모델 로드
+            model_path = os.path.join("../models", self.yolo_model_name)
+            if not os.path.exists(model_path):
+                print(f"📥 YOLO11L 모델 다운로드 중: {self.yolo_model_name}")
+                
+            self.detection_model = YOLO(model_path)
+            
+            # 디바이스 설정
+            if self.detection_device != "cpu":
+                try:
+                    self.detection_model.to(self.detection_device)
+                    print(f"✅ YOLO11L {self.detection_device.upper()} 모드 활성화")
+                except Exception as e:
+                    print(f"⚠️ YOLO11L {self.detection_device.upper()} 실패, CPU로 폴백: {e}")
+                    self.detection_device = "cpu"
+                    self.detection_model.to('cpu')
+            
+            init_time = time.time() - start_time
+            print(f"✅ YOLO11L 검출 모델 로딩 완료: {init_time:.2f}초")
+            
         except Exception as e:
-            print(f"❌ YOLO11L 로딩 실패: {e}")
-            raise
+            print(f"❌ YOLO11L 모델 로딩 실패: {e}")
+            self.detection_model = None
+            print(f"🔄 간단한 검출기로 폴백")
     
-    def _init_pose_onnx_model(self):
-        """RTMW ONNX 모델 초기화"""
-        print(f"🔧 RTMW ONNX 모델 로딩 중...")
+    def _init_pose_model(self):
+        """RTMW-L ONNX 포즈 추정 모델 초기화"""
+        print(f"🔧 RTMW-L ONNX 포즈 모델 로딩 중... (Provider: {self.pose_provider})")
+        start_time = time.time()
+        
         try:
-            # ONNX Runtime 세션 옵션
+            # ONNX 세션 옵션 설정
             sess_options = ort.SessionOptions()
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            sess_options.intra_op_num_threads = 0  # 자동 설정
-            sess_options.inter_op_num_threads = 0  # 자동 설정
             
-            # ONNX Runtime 세션 생성
+            # Provider 설정
+            providers = [self.pose_provider]
+            if self.pose_provider != 'CPUExecutionProvider':
+                providers.append('CPUExecutionProvider')  # 폴백용
+            
+            # ONNX 세션 생성
             self.pose_session = ort.InferenceSession(
-                self.rtmw_onnx_path, 
+                self.rtmw_onnx_path,
                 sess_options=sess_options,
-                providers=self.onnx_providers
+                providers=providers
             )
             
             # 입력/출력 정보 확인
-            self.pose_input_name = self.pose_session.get_inputs()[0].name
-            self.pose_output_names = [output.name for output in self.pose_session.get_outputs()]
+            self.input_name = self.pose_session.get_inputs()[0].name
+            self.input_shape = self.pose_session.get_inputs()[0].shape
+            self.output_names = [output.name for output in self.pose_session.get_outputs()]
             
-            input_shape = self.pose_session.get_inputs()[0].shape
-            output_shapes = [output.shape for output in self.pose_session.get_outputs()]
+            print(f"📋 ONNX 모델 정보:")
+            print(f"   - 입력: {self.input_name} {self.input_shape}")
+            print(f"   - 출력: {len(self.output_names)}개")
+            print(f"   - Provider: {self.pose_session.get_providers()[0]}")
             
-            print(f"✅ RTMW ONNX 로딩 완료")
-            print(f"   - 입력: {self.pose_input_name} {input_shape}")
-            print(f"   - 출력: {len(self.pose_output_names)}개 {output_shapes}")
-            print(f"   - 프로바이더: {self.pose_session.get_providers()}")
+            init_time = time.time() - start_time
+            print(f"✅ RTMW-L ONNX 포즈 모델 로딩 완료: {init_time:.2f}초")
             
         except Exception as e:
-            print(f"❌ RTMW ONNX 로딩 실패: {e}")
-            raise
+            print(f"❌ RTMW-L ONNX 모델 로딩 실패: {e}")
+            # CPU 폴백 시도
+            print("🔄 CPU Provider로 폴백 시도...")
+            try:
+                self.pose_session = ort.InferenceSession(
+                    self.rtmw_onnx_path,
+                    providers=['CPUExecutionProvider']
+                )
+                self.input_name = self.pose_session.get_inputs()[0].name
+                self.input_shape = self.pose_session.get_inputs()[0].shape
+                self.output_names = [output.name for output in self.pose_session.get_outputs()]
+                self.pose_provider = 'CPUExecutionProvider'
+                print(f"✅ CPU 폴백 성공")
+            except Exception as e2:
+                print(f"❌ CPU 폴백도 실패: {e2}")
+                raise e2
     
     def detect_persons_high_accuracy(self, image: np.ndarray) -> List[List[float]]:
-        """고정확도 사람 검출 (YOLO11L)"""
+        """고정확도 사람 검출"""
+        if self.detection_model is None:
+            return self._simple_person_detection(image)
+        
         try:
             start_time = time.time()
             
-            # YOLO11L 추론
+            # YOLO11L 추론 (고정확도 파라미터)
             results = self.detection_model(
                 image,
                 conf=self.yolo_conf_thresh,
@@ -203,19 +245,25 @@ class YOLO11LONNXRTMWHybridInferencer:
             detection_time = time.time() - start_time
             self.inference_times['detection'].append(detection_time)
             
-            # 검출 결과 추출
+            # 사람(class 0) 검출 결과 추출
             person_boxes = []
+            
             for result in results:
                 boxes = result.boxes
                 if boxes is not None and len(boxes) > 0:
-                    person_coords = boxes.xyxy.cpu().numpy()
-                    person_confs = boxes.conf.cpu().numpy()
+                    person_coords = boxes.xyxy
+                    person_confs = boxes.conf
                     
-                    # 신뢰도 필터링
+                    # 신뢰도 재필터링
                     conf_mask = person_confs >= self.yolo_conf_thresh
                     if conf_mask.any():
                         filtered_boxes = person_coords[conf_mask]
                         filtered_confs = person_confs[conf_mask]
+                        
+                        # numpy 변환
+                        if isinstance(filtered_boxes, torch.Tensor):
+                            filtered_boxes = filtered_boxes.cpu().numpy()
+                            filtered_confs = filtered_confs.cpu().numpy()
                         
                         # 신뢰도순 정렬
                         sorted_indices = np.argsort(filtered_confs)[::-1]
@@ -223,72 +271,101 @@ class YOLO11LONNXRTMWHybridInferencer:
                         
                         person_boxes.extend(sorted_boxes.tolist())
             
-            return person_boxes if person_boxes else []
+            return person_boxes if person_boxes else self._simple_person_detection(image)
             
         except Exception as e:
-            print(f"❌ 사람 검출 실패: {e}")
-            return []
+            print(f"❌ YOLO11L 검출 실패: {e}")
+            return self._simple_person_detection(image)
     
-    def preprocess_for_pose(self, image: np.ndarray, bbox: List[float]) -> np.ndarray:
-        """포즈 추정을 위한 이미지 전처리"""
+    def _simple_person_detection(self, image: np.ndarray) -> List[List[float]]:
+        """간단한 사람 검출 (폴백)"""
+        h, w = image.shape[:2]
+        margin_w = int(w * 0.1)
+        margin_h = int(h * 0.1)
+        bbox = [margin_w, margin_h, w - margin_w, h - margin_h]
+        return [bbox]
+    
+    def _preprocess_image_for_pose(self, crop_image: np.ndarray) -> np.ndarray:
+        """포즈 추정용 이미지 전처리"""
+        # RTMW-L 384x288 크기로 리사이즈
+        resized = cv2.resize(crop_image, self.pose_input_size)  # (288, 384)
+        
+        # BGR to RGB
+        rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        
+        # 정규화 (0-1 범위)
+        normalized = rgb_image.astype(np.float32) / 255.0
+        
+        # 표준화 (ImageNet 평균/표준편차)
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        standardized = (normalized - mean) / std
+        
+        # 차원 변경: HWC -> CHW
+        transposed = standardized.transpose(2, 0, 1)
+        
+        # 배치 차원 추가: CHW -> BCHW
+        batched = np.expand_dims(transposed, axis=0)
+        
+        return batched
+    
+    def _postprocess_pose_output(self, outputs: List[np.ndarray], 
+                               original_crop_shape: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
+        """포즈 추정 출력 후처리"""
         try:
-            x1, y1, x2, y2 = map(int, bbox)
+            # RTMW 출력 형태에 따라 조정 필요
+            # 일반적으로 keypoints와 heatmap/simcc 출력이 있음
             
-            # 바운딩박스 확장 (여백 추가)
-            img_h, img_w = image.shape[:2]
-            margin_x = int((x2 - x1) * 0.1)
-            margin_y = int((y2 - y1) * 0.1)
-            
-            x1 = max(0, x1 - margin_x)
-            y1 = max(0, y1 - margin_y)
-            x2 = min(img_w, x2 + margin_x)
-            y2 = min(img_h, y2 + margin_y)
-            
-            # 크롭
-            crop_img = image[y1:y2, x1:x2]
-            
-            # 리사이즈
-            target_h, target_w = self.input_size
-            resized_img = cv2.resize(crop_img, (target_w, target_h))
-            
-            # 정규화
-            normalized_img = resized_img.astype(np.float32) / 255.0
-            
-            # 평균/표준편차 정규화 (ImageNet 기준)
-            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-            normalized_img = (normalized_img - mean) / std
-            
-            # BGR to RGB
-            normalized_img = normalized_img[:, :, ::-1]
-            
-            # 배치 차원 추가 및 채널 순서 변경 (NCHW)
-            input_tensor = normalized_img.transpose(2, 0, 1)[np.newaxis, ...]
-            
-            return input_tensor, (x1, y1, x2, y2), (crop_img.shape[1], crop_img.shape[0])
-            
+            if len(outputs) >= 2:
+                # SimCC 방식의 경우
+                pred_x = outputs[0]  # x 좌표 예측
+                pred_y = outputs[1]  # y 좌표 예측
+                
+                # 최대값 위치 찾기
+                keypoints_x = np.argmax(pred_x[0], axis=1)
+                keypoints_y = np.argmax(pred_y[0], axis=1)
+                
+                # 신뢰도 계산
+                scores_x = np.max(pred_x[0], axis=1)
+                scores_y = np.max(pred_y[0], axis=1)
+                scores = np.minimum(scores_x, scores_y)
+                
+                # 좌표 스케일링 (모델 입력 크기에서 크롭 이미지 크기로)
+                scale_x = original_crop_shape[1] / self.pose_input_size[0]  # width
+                scale_y = original_crop_shape[0] / self.pose_input_size[1]  # height
+                
+                keypoints_x = keypoints_x * scale_x
+                keypoints_y = keypoints_y * scale_y
+                
+                # 키포인트 배열 생성
+                keypoints = np.stack([keypoints_x, keypoints_y], axis=1)
+                
+                return keypoints, scores
+            else:
+                # 다른 출력 형태의 경우
+                print(f"⚠️ 예상하지 못한 출력 형태: {len(outputs)}개 출력")
+                return np.zeros((133, 2)), np.zeros(133)
+                
         except Exception as e:
-            print(f"❌ 전처리 실패: {e}")
-            return None, None, None
+            print(f"❌ 포즈 출력 후처리 실패: {e}")
+            return np.zeros((133, 2)), np.zeros(133)
     
-    def estimate_pose_onnx(self, image: np.ndarray, bbox: List[float]) -> Tuple[np.ndarray, np.ndarray]:
-        """RTMW ONNX를 사용한 포즈 추정"""
+    def estimate_pose_on_crop(self, crop_image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """크롭된 이미지에서 ONNX 포즈 추정"""
         try:
             start_time = time.time()
             
             # 전처리
-            input_tensor, crop_bbox, crop_size = self.preprocess_for_pose(image, bbox)
-            if input_tensor is None:
-                return np.zeros((self.num_keypoints, 2)), np.zeros(self.num_keypoints)
+            input_tensor = self._preprocess_image_for_pose(crop_image)
             
             # ONNX 추론
-            ort_inputs = {self.pose_input_name: input_tensor}
-            ort_outputs = self.pose_session.run(self.pose_output_names, ort_inputs)
+            outputs = self.pose_session.run(
+                self.output_names,
+                {self.input_name: input_tensor}
+            )
             
             # 후처리
-            keypoints, scores = self.postprocess_pose_output(
-                ort_outputs, crop_bbox, crop_size, self.input_size
-            )
+            keypoints, scores = self._postprocess_pose_output(outputs, crop_image.shape[:2])
             
             pose_time = time.time() - start_time
             self.inference_times['pose'].append(pose_time)
@@ -297,83 +374,79 @@ class YOLO11LONNXRTMWHybridInferencer:
             
         except Exception as e:
             print(f"❌ ONNX 포즈 추정 실패: {e}")
-            return np.zeros((self.num_keypoints, 2)), np.zeros(self.num_keypoints)
+            return np.zeros((133, 2)), np.zeros(133)
     
-    def postprocess_pose_output(self, ort_outputs, crop_bbox, crop_size, input_size):
-        """포즈 추정 결과 후처리"""
+    def estimate_pose_batch(self, crop_images: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+        """배치 포즈 추정 (ONNX)"""
+        if not crop_images:
+            return np.array([]), np.array([])
+        
+        batch_keypoints = []
+        batch_scores = []
+        
         try:
-            # RTMW 출력 형태에 따라 처리 (일반적으로 heatmap + simcc)
-            if len(ort_outputs) >= 2:
-                # SimCC 출력인 경우 (x, y 좌표 직접 출력)
-                pred_x = ort_outputs[0][0]  # [133]
-                pred_y = ort_outputs[1][0]  # [133] 
-                
-                # 키포인트 좌표 복원
-                target_w, target_h = input_size[1], input_size[0]  # (W, H)
-                crop_w, crop_h = crop_size
-                x1, y1, x2, y2 = crop_bbox
-                
-                # 정규화된 좌표를 크롭 이미지 좌표로 변환
-                keypoints_x = pred_x * crop_w / target_w
-                keypoints_y = pred_y * crop_h / target_h
-                
-                # 크롭 좌표를 원본 이미지 좌표로 변환
-                keypoints_x = keypoints_x + x1
-                keypoints_y = keypoints_y + y1
-                
-                # 키포인트 배열 생성
-                keypoints = np.stack([keypoints_x, keypoints_y], axis=1)  # [133, 2]
-                
-                # 점수 계산 (SimCC의 경우 좌표 신뢰도 기반)
-                scores = np.ones(self.num_keypoints, dtype=np.float32) * 0.9  # 기본값
-                
-            else:
-                # 히트맵 출력인 경우
-                heatmap = ort_outputs[0][0]  # [133, H, W]
-                
-                keypoints = []
-                scores = []
-                
-                for i in range(self.num_keypoints):
-                    hm = heatmap[i]
-                    
-                    # 최대값 위치 찾기
-                    max_val = np.max(hm)
-                    if max_val > 0.1:  # 임계값
-                        max_idx = np.unravel_index(np.argmax(hm), hm.shape)
-                        
-                        # 히트맵 좌표를 이미지 좌표로 변환
-                        hm_h, hm_w = hm.shape
-                        y_coord = max_idx[0] * crop_size[1] / hm_h + crop_bbox[1]
-                        x_coord = max_idx[1] * crop_size[0] / hm_w + crop_bbox[0]
-                        
-                        keypoints.append([x_coord, y_coord])
-                        scores.append(max_val)
-                    else:
-                        keypoints.append([0, 0])
-                        scores.append(0.0)
-                
-                keypoints = np.array(keypoints, dtype=np.float32)
-                scores = np.array(scores, dtype=np.float32)
+            # 배치 전처리
+            batch_inputs = []
+            for crop_image in crop_images:
+                input_tensor = self._preprocess_image_for_pose(crop_image)
+                batch_inputs.append(input_tensor[0])  # 배치 차원 제거
             
-            return keypoints, scores
+            batch_tensor = np.stack(batch_inputs, axis=0)
             
+            # 배치 추론
+            outputs = self.pose_session.run(
+                self.output_names,
+                {self.input_name: batch_tensor}
+            )
+            
+            # 각 이미지에 대해 후처리
+            for i, crop_image in enumerate(crop_images):
+                # 배치 출력에서 i번째 결과 추출
+                image_outputs = [output[i:i+1] for output in outputs]
+                keypoints, scores = self._postprocess_pose_output(image_outputs, crop_image.shape[:2])
+                batch_keypoints.append(keypoints)
+                batch_scores.append(scores)
+            
+            return np.array(batch_keypoints), np.array(batch_scores)
+        
         except Exception as e:
-            print(f"❌ 후처리 실패: {e}")
-            return np.zeros((self.num_keypoints, 2)), np.zeros(self.num_keypoints)
+            print(f"배치 처리 실패, 개별 처리로 폴백: {e}")
+            # 폴백: 개별 처리
+            for crop_image in crop_images:
+                keypoints, scores = self.estimate_pose_on_crop(crop_image)
+                batch_keypoints.append(keypoints)
+                batch_scores.append(scores)
+        
+            return np.array(batch_keypoints), np.array(batch_scores)
     
-    def process_frame(self, image: np.ndarray) -> Tuple[np.ndarray, List[Tuple[np.ndarray, np.ndarray, List[float]]]]:
-        """프레임 처리 (YOLO11L + RTMW ONNX)"""
+    def process_frame(self, image: np.ndarray, conf_thresh: float = None) -> Tuple[np.ndarray, List[Tuple[np.ndarray, np.ndarray, List[float]]]]:
+        """프레임 처리 (고정확도 검출 + ONNX 포즈 추정)"""
         start_time = time.time()
         
-        # 1. 사람 검출
+        # 신뢰도 임계값 설정
+        if conf_thresh is None:
+            conf_thresh = self.yolo_conf_thresh
+        
+        # 1. 고정확도 사람 검출
         person_boxes = self.detect_persons_high_accuracy(image)
         
         # 2. 각 사람에 대해 포즈 추정
         results = []
         for bbox in person_boxes:
-            keypoints, scores = self.estimate_pose_onnx(image, bbox)
-            results.append((keypoints, scores, bbox))
+            # 바운딩박스에서 크롭
+            x1, y1, x2, y2 = map(int, bbox)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
+            
+            if x2 > x1 and y2 > y1:
+                crop_image = image[y1:y2, x1:x2]
+                keypoints, scores = self.estimate_pose_on_crop(crop_image)
+                
+                # 키포인트를 원본 이미지 좌표계로 변환
+                keypoints[:, 0] += x1
+                keypoints[:, 1] += y1
+                
+                results.append((keypoints, scores, bbox))
         
         total_time = time.time() - start_time
         self.inference_times['total'].append(total_time)
@@ -384,7 +457,7 @@ class YOLO11LONNXRTMWHybridInferencer:
         return vis_image, results
     
     def visualize_results(self, image: np.ndarray, results: List[Tuple[np.ndarray, np.ndarray, List[float]]]) -> np.ndarray:
-        """결과 시각화 - RTMW 133 키포인트"""
+        """결과 시각화"""
         vis_image = image.copy()
         
         for i, (keypoints, scores, bbox) in enumerate(results):
@@ -392,17 +465,25 @@ class YOLO11LONNXRTMWHybridInferencer:
             x1, y1, x2, y2 = map(int, bbox)
             color = (0, 255, 0) if i == 0 else (255, 0, 255)
             cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
+            
+            # 사람 번호 표시
             cv2.putText(vis_image, f"Person {i+1}", (x1, y1-10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             
-            # 신체 키포인트 그리기
-            self._draw_body_keypoints(vis_image, keypoints, scores)
-            
-            # 얼굴 키포인트 그리기 (선택적)
-            self._draw_face_keypoints(vis_image, keypoints, scores, draw_all=False)
-            
-            # 손 키포인트 그리기 (선택적)
-            self._draw_hand_keypoints(vis_image, keypoints, scores)
+            # 키포인트 그리기 (신뢰도별 색상)
+            for j, (kpt, score) in enumerate(zip(keypoints, scores)):
+                if score > 0.3:
+                    x, y = int(kpt[0]), int(kpt[1])
+                    if 0 <= x < vis_image.shape[1] and 0 <= y < vis_image.shape[0]:
+                        # 신뢰도에 따른 색상
+                        if score > 0.8:
+                            kpt_color = (0, 255, 0)    # 높은 신뢰도: 초록
+                        elif score > 0.6:
+                            kpt_color = (0, 255, 255)  # 중간 신뢰도: 노랑
+                        else:
+                            kpt_color = (0, 0, 255)    # 낮은 신뢰도: 빨강
+                        
+                        cv2.circle(vis_image, (x, y), 3, kpt_color, -1)
         
         # 성능 정보 표시
         if self.inference_times['total']:
@@ -410,77 +491,19 @@ class YOLO11LONNXRTMWHybridInferencer:
             cv2.putText(vis_image, f"FPS: {fps:.1f}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        cv2.putText(vis_image, "YOLO11L + RTMW ONNX", 
+        # 모델 정보
+        cv2.putText(vis_image, "YOLO11L + RTMW-L ONNX", 
                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(vis_image, f"ONNX: {self.pose_session.get_providers()[0]}", 
+        cv2.putText(vis_image, f"Detection: {self.detection_device.upper()}", 
                    (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(vis_image, f"Pose: {self.pose_provider.split('ExecutionProvider')[0]}", 
+                   (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         return vis_image
     
-    def _draw_body_keypoints(self, image: np.ndarray, keypoints: np.ndarray, scores: np.ndarray):
-        """신체 키포인트 그리기"""
-        # 신체 연결선 그리기
-        for connection in self.body_connections:
-            kpt1_idx, kpt2_idx = connection
-            if (kpt1_idx < len(keypoints) and kpt2_idx < len(keypoints) and 
-                scores[kpt1_idx] > 0.3 and scores[kpt2_idx] > 0.3):
-                
-                pt1 = tuple(map(int, keypoints[kpt1_idx]))
-                pt2 = tuple(map(int, keypoints[kpt2_idx]))
-                cv2.line(image, pt1, pt2, (0, 255, 0), 2)
-        
-        # 신체 키포인트 그리기
-        for i in self.body_keypoints:
-            if i < len(keypoints) and scores[i] > 0.3:
-                x, y = int(keypoints[i][0]), int(keypoints[i][1])
-                if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                    if scores[i] > 0.8:
-                        color = (0, 255, 0)  # 높은 신뢰도: 초록
-                    elif scores[i] > 0.6:
-                        color = (0, 255, 255)  # 중간 신뢰도: 노랑
-                    else:
-                        color = (0, 0, 255)  # 낮은 신뢰도: 빨강
-                    
-                    cv2.circle(image, (x, y), 4, color, -1)
-    
-    def _draw_face_keypoints(self, image: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, draw_all: bool = False):
-        """얼굴 키포인트 그리기"""
-        if not draw_all:
-            # 주요 얼굴 특징점만 그리기
-            key_face_points = [30, 48, 54, 36, 45]  # 코끝, 입 끝, 눈 등
-            for i in key_face_points:
-                face_idx = 17 + i  # 얼굴 키포인트는 17번부터
-                if (face_idx < len(keypoints) and scores[face_idx] > 0.5):
-                    x, y = int(keypoints[face_idx][0]), int(keypoints[face_idx][1])
-                    if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                        cv2.circle(image, (x, y), 2, (255, 255, 0), -1)
-        else:
-            # 모든 얼굴 키포인트 그리기
-            for i in self.face_keypoints:
-                if i < len(keypoints) and scores[i] > 0.4:
-                    x, y = int(keypoints[i][0]), int(keypoints[i][1])
-                    if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                        cv2.circle(image, (x, y), 1, (255, 255, 0), -1)
-    
-    def _draw_hand_keypoints(self, image: np.ndarray, keypoints: np.ndarray, scores: np.ndarray):
-        """손 키포인트 그리기"""
-        # 왼손
-        for i in self.left_hand_keypoints:
-            if i < len(keypoints) and scores[i] > 0.3:
-                x, y = int(keypoints[i][0]), int(keypoints[i][1])
-                if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                    cv2.circle(image, (x, y), 2, (0, 0, 255), -1)  # 빨강
-        
-        # 오른손
-        for i in self.right_hand_keypoints:
-            if i < len(keypoints) and scores[i] > 0.3:
-                x, y = int(keypoints[i][0]), int(keypoints[i][1])
-                if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                    cv2.circle(image, (x, y), 2, (255, 0, 0), -1)  # 파랑
-    
-    def benchmark_performance(self, image: np.ndarray, num_runs: int = 20) -> dict:
+    def benchmark_performance(self, image: np.ndarray, num_runs: int = 15) -> dict:
         """성능 벤치마크"""
-        print(f"🏃 ONNX 성능 벤치마크 ({num_runs}회)...")
+        print(f"🏃 YOLO11L + RTMW-L ONNX 성능 벤치마크 ({num_runs}회)...")
         
         # 워밍업
         for _ in range(3):
@@ -510,7 +533,7 @@ class YOLO11LONNXRTMWHybridInferencer:
     
     def test_single_image(self, image_path: str):
         """단일 이미지 테스트"""
-        print(f"\n=== YOLO11L + RTMW ONNX 테스트: {os.path.basename(image_path)} ===")
+        print(f"\n=== YOLO11L + RTMW-L ONNX 테스트: {os.path.basename(image_path)} ===")
         
         if not os.path.exists(image_path):
             print(f"❌ 이미지 파일 없음: {image_path}")
@@ -531,21 +554,16 @@ class YOLO11LONNXRTMWHybridInferencer:
         print(f"✅ 검출된 사람 수: {len(results)}")
         
         for i, (keypoints, scores, bbox) in enumerate(results):
-            body_valid = np.sum(scores[self.body_keypoints] > 0.3)
-            face_valid = np.sum(scores[self.face_keypoints] > 0.3)
-            left_hand_valid = np.sum(scores[self.left_hand_keypoints] > 0.3)
-            right_hand_valid = np.sum(scores[self.right_hand_keypoints] > 0.3)
-            
-            print(f"   사람 {i+1}:")
-            print(f"     - 신체: {body_valid}/17 키포인트")
-            print(f"     - 얼굴: {face_valid}/68 키포인트")
-            print(f"     - 왼손: {left_hand_valid}/21 키포인트")
-            print(f"     - 오른손: {right_hand_valid}/21 키포인트")
+            valid_kpts = np.sum(scores > 0.3)
+            high_conf_kpts = np.sum(scores > 0.8)
+            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            print(f"   사람 {i+1}: {valid_kpts}/133 키포인트 (신뢰도 > 0.3), {high_conf_kpts} 고신뢰도")
+            print(f"            바운딩박스 크기: {bbox_area:.0f}px²")
         
         # 성능 벤치마크
-        stats = self.benchmark_performance(image)
+        stats = self.benchmark_performance(image, num_runs=15)
         
-        print(f"\n📊 ONNX 성능 통계:")
+        print(f"\n📊 성능 통계:")
         for stage, stat in stats.items():
             if stat:
                 print(f"   {stage}:")
@@ -555,43 +573,103 @@ class YOLO11LONNXRTMWHybridInferencer:
                     print(f"     - FPS: {stat['fps']:.1f}")
         
         # 결과 저장
-        output_path = f"onnx_result_{os.path.basename(image_path)}"
+        output_path = f"yolo11l_rtmw_onnx_result_{os.path.basename(image_path)}"
         cv2.imwrite(output_path, vis_image)
         print(f"💾 결과 저장: {output_path}")
         
         return vis_image, results, stats
+
+def main():
+    """메인 테스트 함수"""
+    # 모델 경로 설정
+    rtmw_onnx_path = "../models/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"
     
+    try:
+        print("🚀 YOLO11L + RTMW-L ONNX 하이브리드 추론기 테스트")
+        print("=" * 70)
+        
+        # 사용 가능한 ONNX Provider 확인
+        get_available_providers()
+        
+        # YOLO11L + RTMW-L ONNX 하이브리드 추론기 생성
+        inferencer = YOLO11LRTMWONNXInferencer(
+            rtmw_onnx_path=rtmw_onnx_path,
+            detection_device="auto",
+            pose_device="auto",
+            optimize_for_accuracy=True
+        )
+        
+        # 테스트 이미지
+        test_image = "winter01.jpg"
+        inferencer.test_single_image(test_image)
+        
+        # 실시간 웹캠 테스트
+        print(f"\n🎥 YOLO11L + RTMW-L ONNX 실시간 웹캠 테스트를 시작하시겠습니까? (y/n): ", end="")
+        choice = input().strip().lower()
+        
+        if choice == 'y':
+            inferencer.test_webcam()
+        
+        print(f"\n🏆 YOLO11L + RTMW-L ONNX 시스템 특징:")
+        print(f"   🎯 최고 정확도: Large 모델로 더 정확한 사람 검출")
+        print(f"   🔍 정밀 검출: 낮은 신뢰도 임계값으로 놓치기 쉬운 사람도 검출")
+        print(f"   📐 최적 입력: YOLO 832px, RTMW-L 384x288")
+        print(f"   ⚡ ONNX 가속: OpenVINO/CUDA/DirectML 활용")
+        print(f"   💨 빠른 추론: ONNX Runtime 최적화")
+        
+    except Exception as e:
+        print(f"❌ 테스트 실패: {e}")
+        import traceback
+        traceback.print_exc()
+
     def test_webcam(self, camera_id: int = 0, window_size: Tuple[int, int] = (1280, 720)):
-        """실시간 웹캠 테스트"""
-        print(f"\n=== YOLO11L + RTMW ONNX 실시간 테스트 (카메라 ID: {camera_id}) ===")
+        """실시간 웹캠 테스트 - YOLO11L + RTMW-L ONNX"""
+        print(f"\n=== YOLO11L + RTMW-L ONNX 실시간 웹캠 테스트 (카메라 ID: {camera_id}) ===")
+        print("📹 웹캠 연결 중...")
         
         cap = cv2.VideoCapture(camera_id)
         if not cap.isOpened():
-            print(f"❌ 웹캠 열기 실패")
+            print(f"❌ 웹캠 열기 실패 (카메라 ID: {camera_id})")
             return
         
         # 웹캠 설정
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, window_size[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, window_size[1])
         cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         
-        print(f"🎮 조작법: ESC(종료), S(스크린샷), SPACE(일시정지)")
+        # 실제 웹캠 해상도 확인
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
         
+        print(f"✅ 웹캠 연결 성공: {actual_width}x{actual_height}, {actual_fps:.1f}fps")
+        print(f"🎮 조작법:")
+        print(f"   - ESC: 종료")
+        print(f"   - S: 현재 프레임 스크린샷")
+        print(f"   - SPACE: 일시정지/재생")
+        print(f"   - A: 정확도 모드 토글 (높음/표준)")
+        print(f"   - +/-: 신뢰도 임계값 조정")
+        
+        # 성능 측정 변수
         frame_count = 0
         fps_history = deque(maxlen=30)
         paused = False
         screenshot_count = 0
+        accuracy_mode = True
+        current_conf_thresh = self.yolo_conf_thresh
         
         try:
             while True:
                 if not paused:
                     ret, frame = cap.read()
                     if not ret:
+                        print("❌ 프레임 읽기 실패")
                         break
                     
                     # 프레임 처리
                     start_time = time.time()
-                    vis_frame, results = self.process_frame(frame)
+                    vis_frame, results = self.process_frame(frame, conf_thresh=current_conf_thresh)
                     process_time = time.time() - start_time
                     
                     # FPS 계산
@@ -600,100 +678,83 @@ class YOLO11LONNXRTMWHybridInferencer:
                     avg_fps = np.mean(fps_history) if fps_history else 0
                     
                     # 추가 정보 표시
+                    info_y = 140
                     cv2.putText(vis_frame, f"Avg FPS: {avg_fps:.1f}", 
-                               (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                               (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis_frame, f"Provider: {self.pose_provider.split('ExecutionProvider')[0]}", 
+                               (10, info_y + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis_frame, f"Mode: {'High Accuracy' if accuracy_mode else 'Standard'}", 
+                               (10, info_y + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(vis_frame, f"Conf: {current_conf_thresh:.2f}", 
+                               (10, info_y + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     
+                    # 검출된 사람 정보
                     if results:
-                        total_keypoints = sum(np.sum(scores > 0.3) for _, scores, _ in results)
-                        cv2.putText(vis_frame, f"Total keypoints: {total_keypoints}", 
-                                   (10, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                        person_info = f"Persons: {len(results)}"
+                        for i, (_, scores, _) in enumerate(results):
+                            valid_kpts = np.sum(scores > 0.3)
+                            high_conf_kpts = np.sum(scores > 0.8)
+                            person_info += f" | P{i+1}: {valid_kpts}/133 ({high_conf_kpts} high)"
+                        cv2.putText(vis_frame, person_info, 
+                                   (10, info_y + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
                     
                     frame_count += 1
                 
                 # 화면 표시
-                cv2.imshow('YOLO11L + RTMW ONNX Real-time', vis_frame)
+                cv2.imshow('YOLO11L + RTMW-L ONNX Real-time', vis_frame)
                 
                 # 키 입력 처리
                 key = cv2.waitKey(1) & 0xFF
                 
                 if key == 27:  # ESC
                     break
-                elif key == ord('s'):  # 스크린샷
-                    screenshot_name = f"onnx_webcam_screenshot_{screenshot_count:04d}.jpg"
+                elif key == ord('s') or key == ord('S'):  # 스크린샷
+                    screenshot_name = f"yolo11l_rtmw_onnx_screenshot_{screenshot_count:04d}.jpg"
                     cv2.imwrite(screenshot_name, vis_frame)
                     print(f"📸 스크린샷 저장: {screenshot_name}")
                     screenshot_count += 1
-                elif key == ord(' '):  # 일시정지
+                elif key == ord(' '):  # 일시정지/재생
                     paused = not paused
                     print(f"⏸️ {'일시정지' if paused else '재생'}")
+                elif key == ord('a') or key == ord('A'):  # 정확도 모드 토글
+                    accuracy_mode = not accuracy_mode
+                    if accuracy_mode:
+                        current_conf_thresh = 0.4
+                        self.detection_img_size = 832
+                        print("🎯 고정확도 모드 활성화")
+                    else:
+                        current_conf_thresh = 0.6
+                        self.detection_img_size = 640
+                        print("⚡ 표준 속도 모드 활성화")
+                elif key == ord('+') or key == ord('='):  # 신뢰도 증가
+                    current_conf_thresh = min(0.9, current_conf_thresh + 0.05)
+                    print(f"📈 신뢰도 임계값: {current_conf_thresh:.2f}")
+                elif key == ord('-'):  # 신뢰도 감소
+                    current_conf_thresh = max(0.1, current_conf_thresh - 0.05)
+                    print(f"📉 신뢰도 임계값: {current_conf_thresh:.2f}")
                 
-                # 성능 통계 출력
+                # 성능 통계 주기적 출력
                 if frame_count % 60 == 0 and frame_count > 0:
-                    print(f"📊 프레임 {frame_count}: 평균 {avg_fps:.1f}fps, {len(results)}명 검출")
+                    print(f"📊 프레임 {frame_count}: 평균 {avg_fps:.1f}fps, "
+                          f"{len(results)}명 검출 (Provider: {self.pose_provider.split('ExecutionProvider')[0]})")
                     
         except KeyboardInterrupt:
-            print("\n⏹️ 사용자가 테스트를 중단했습니다.")
+            print("\n⏹️ 사용자가 웹캠 테스트를 중단했습니다.")
         
         finally:
             cap.release()
             cv2.destroyAllWindows()
             
+            # 최종 통계
             if fps_history:
                 final_avg_fps = np.mean(fps_history)
-                print(f"\n📊 ONNX 웹캠 테스트 완료:")
+                print(f"\n📊 YOLO11L + RTMW-L ONNX 웹캠 테스트 완료:")
                 print(f"   - 처리된 프레임: {frame_count}")
                 print(f"   - 평균 FPS: {final_avg_fps:.1f}")
-                print(f"   - ONNX 프로바이더: {self.pose_session.get_providers()[0]}")
+                print(f"   - 검출 디바이스: {self.detection_device}")
+                print(f"   - 포즈 Provider: {self.pose_provider}")
                 print(f"   - 스크린샷: {screenshot_count}개 저장")
-
-def main():
-    """메인 테스트 함수"""
-    # ONNX 모델 경로
-    rtmw_onnx_path = "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122_384x288.onnx"
-    
-    # ONNX 파일 존재 확인
-    if not os.path.exists(rtmw_onnx_path):
-        print(f"❌ ONNX 파일 없음: {rtmw_onnx_path}")
-        print(f"💡 먼저 RTMW 모델을 ONNX로 변환해야 합니다.")
-        print(f"   python rtmw_onnx_converter.py 실행")
-        return
-    
-    try:
-        print("🚀 YOLO11L + RTMW ONNX 하이브리드 추론기 테스트")
-        print("=" * 60)
-        
-        # ONNX 하이브리드 추론기 생성
-        inferencer = YOLO11LONNXRTMWHybridInferencer(
-            rtmw_onnx_path=rtmw_onnx_path,
-            detection_device="auto",
-            input_size=(288, 384),  # RTMW 기본 입력 크기
-            optimize_for_accuracy=True
-        )
-        
-        # 테스트 이미지
-        test_image = "winter01.jpg"
-        if os.path.exists(test_image):
-            inferencer.test_single_image(test_image)
-        else:
-            print(f"⚠️ 테스트 이미지 없음: {test_image}")
-        
-        # 실시간 웹캠 테스트
-        print(f"\n🎥 실시간 웹캠 테스트를 시작하시겠습니까? (y/n): ", end="")
-        choice = input().strip().lower()
-        
-        if choice == 'y':
-            inferencer.test_webcam()
-        
-        print(f"\n🏆 ONNX 하이브리드 시스템 특징:")
-        print(f"   ⚡ 빠른 추론: ONNX Runtime 최적화")
-        print(f"   🎯 고정확도: YOLO11L + RTMW 133 키포인트")
-        print(f"   💻 다양한 백엔드: CUDA, CPU, OpenVINO 등")
-        print(f"   📦 배포 용이: ONNX 표준 형식")
-        
-    except Exception as e:
-        print(f"❌ 테스트 실패: {e}")
-        import traceback
-        traceback.print_exc()
+                print(f"   - 최종 신뢰도 임계값: {current_conf_thresh:.2f}")
 
 if __name__ == "__main__":
     main()
