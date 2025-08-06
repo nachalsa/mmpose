@@ -856,7 +856,8 @@ class BatchProcessor:
         # 모델 초기화 (테스트는 단일 프로세스에서 진행)
         processor = StreamlinedVideoProcessor(
             rtmw_model_name=self.rtmw_model_name,
-            rtmw_config_path=self.rtmw_config_path
+            yolo_device=self.yolo_device,
+            pose_device=self.pose_device
         )
         
         folder_video_data = self.collect_videos_by_folder()

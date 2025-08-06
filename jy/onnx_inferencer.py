@@ -515,15 +515,15 @@ class YOLO11LRTMWONNXInferencer:
         normalized = rgb_image.astype(np.float32) / 255.0
         
         # 표준화 (ImageNet 평균/표준편차)
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
         standardized = (normalized - mean) / std
         
         # 차원 변경: HWC -> CHW
         transposed = standardized.transpose(2, 0, 1)
         
         # 배치 차원 추가: CHW -> BCHW
-        batched = np.expand_dims(transposed, axis=0)
+        batched = np.expand_dims(transposed, axis=0).astype(np.float32)
         
         return batched
     
