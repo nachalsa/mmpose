@@ -307,6 +307,91 @@ class StreamlinedVideoProcessor:
             if cap:
                 cap.release()
 
+    def process_video_to_arrays_batched(self, video_path: str, frame_batch_size: int = 16) -> Optional[Dict[str, Union[List[np.ndarray], np.ndarray, int]]]:
+        """GPU 배치 처리를 위한 개선된 비디오 처리"""
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            self.logger.error(f"❌ 비디오 열기 실패: {video_path}")
+            return None
+        
+        try:
+            all_jpeg_frames, all_keypoints, all_scores = [], [], []
+            frame_batch = []
+            bbox_batch = []
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    # 마지막 배치 처리
+                    if frame_batch:
+                        self._process_frame_batch(frame_batch, bbox_batch, all_jpeg_frames, all_keypoints, all_scores)
+                    break
+                
+                # YOLO 검출 (개별 처리)
+                vis_image, results = self.inferencer.process_frame(frame)
+                if not results or len(results) == 0:
+                    continue
+                
+                _, _, bbox = results[0]
+                crop_image = self._crop_person_image_rtmw(frame, bbox)
+                if crop_image is None:
+                    continue
+                
+                frame_batch.append(crop_image)
+                bbox_batch.append(bbox)
+                
+                # 배치가 차면 처리
+                if len(frame_batch) >= frame_batch_size:
+                    self._process_frame_batch(frame_batch, bbox_batch, all_jpeg_frames, all_keypoints, all_scores)
+                    frame_batch = []
+                    bbox_batch = []
+            
+            if not all_jpeg_frames:
+                return None
+            
+            return {
+                'jpeg_frames': all_jpeg_frames,
+                'keypoints': np.stack(all_keypoints),
+                'scores': np.stack(all_scores),
+                'frame_count': len(all_jpeg_frames)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ 비디오 처리 실패: {video_path}, 오류: {e}")
+            return None
+        finally:
+            if cap:
+                cap.release()
+
+    def _process_frame_batch(self, frame_batch: List[np.ndarray], bbox_batch: List, 
+                        all_jpeg_frames: List, all_keypoints: List, all_scores: List):
+        """프레임 배치를 GPU에서 한번에 처리"""
+        try:
+            # 배치 포즈 추정 (GPU 병렬 처리)
+            batch_keypoints, batch_scores = self.inferencer.estimate_pose_batch(frame_batch)
+            
+            # 결과 저장
+            for i, (crop_image, keypoints, scores) in enumerate(zip(frame_batch, batch_keypoints, batch_scores)):
+                ret_jpg, encoded_jpg = cv2.imencode('.jpg', crop_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ret_jpg:
+                    all_jpeg_frames.append(encoded_jpg)
+                    all_keypoints.append(keypoints)
+                    all_scores.append(scores)
+                
+        except Exception as e:
+            self.logger.warning(f"배치 처리 실패: {e}")
+            # 폴백: 개별 처리
+            for crop_image in frame_batch:
+                try:
+                    keypoints, scores = self.inferencer.estimate_pose_on_crop(crop_image)
+                    ret_jpg, encoded_jpg = cv2.imencode('.jpg', crop_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    if ret_jpg:
+                        all_jpeg_frames.append(encoded_jpg)
+                        all_keypoints.append(keypoints)
+                        all_scores.append(scores)
+                except:
+                    continue
+
     def process_video(self, item_type: str, item_id: int, video_path: str, output_dir: Path) -> bool:
         """
         WORD/SEN ID 기반으로 비디오 처리하고 저장

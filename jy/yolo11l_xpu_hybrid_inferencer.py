@@ -332,6 +332,55 @@ class YOLO11LXPUHybridInferencer:
             print(f"❌ 크롭 이미지 포즈 추정 실패: {e}")
             return np.zeros((133, 2)), np.zeros(133)
     
+    def estimate_pose_batch(self, crop_images: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+        """배치 포즈 추정 (GPU 병렬 처리)"""
+        if not crop_images:
+            return np.array([]), np.array([])
+        
+        batch_size = len(crop_images)
+        batch_keypoints = []
+        batch_scores = []
+        
+        try:
+            # 배치 텐서 준비
+            batch_tensor = torch.stack([
+                self._preprocess_crop_for_batch(img) for img in crop_images
+            ]).to(self.pose_device)
+            
+            # 배치 추론
+            with torch.no_grad():
+                batch_results = self.pose_model(batch_tensor)
+            
+            # 후처리
+            for i in range(batch_size):
+                keypoints, scores = self._postprocess_batch_result(batch_results, i, crop_images[i].shape)
+                batch_keypoints.append(keypoints)
+                batch_scores.append(scores)
+            
+            return np.array(batch_keypoints), np.array(batch_scores)
+        
+        except Exception as e:
+            print(f"배치 처리 실패, 개별 처리로 폴백: {e}")
+            # 폴백: 개별 처리
+            for crop_image in crop_images:
+                keypoints, scores = self.estimate_pose_on_crop(crop_image)
+                batch_keypoints.append(keypoints)
+                batch_scores.append(scores)
+        
+        return np.array(batch_keypoints), np.array(batch_scores)
+
+    def _preprocess_crop_for_batch(self, crop_image: np.ndarray) -> torch.Tensor:
+        """배치 처리용 전처리"""
+        # 기존 전처리 로직을 텐서로 변환
+        # ... 구체적인 구현은 RTMW 모델 요구사항에 따라 달라짐
+        pass
+
+    def _postprocess_batch_result(self, batch_results, batch_idx: int, original_shape) -> Tuple[np.ndarray, np.ndarray]:
+        """배치 결과 후처리"""
+        # 배치 결과에서 개별 결과 추출 및 후처리
+        # ... 구체적인 구현은 RTMW 모델 출력 형태에 따라 달라짐
+        pass
+    
     def process_frame(self, image: np.ndarray, conf_thresh: float = None) -> Tuple[np.ndarray, List[Tuple[np.ndarray, np.ndarray, List[float]]]]:
         """프레임 처리 (고정확도 검출 + 포즈 추정)"""
         start_time = time.time()
