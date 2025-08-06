@@ -823,11 +823,11 @@ class TrackingYOLO11LHybridInferencer:
 def main():
     """메인 테스트 함수"""
     # 모델 경로 설정
-    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
-    rtmw_checkpoint = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
+    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py"
+    rtmw_checkpoint = "../models/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
     
     try:
-        print("🚀 트래킹 기반 YOLO11L + RTMW 수화 인식 시스템 테스트")
+        print("🚀 트래킹 기반 YOLO11L + RTMW-L 수화 인식 시스템 테스트")
         print("=" * 70)
         
         # 트래킹 하이브리드 추론기 생성

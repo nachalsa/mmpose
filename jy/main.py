@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Main Module for RTMW-x
-RTMW-x Intel XPU 추론 메인 실행 파일
+Main Module for RTMW-l
+RTMW-l Intel XPU 추론 메인 실행 파일
 """
 
 import cv2
@@ -95,9 +95,9 @@ def test_image(image_path: str):
 
 
 def main():
-    """RTMW-x Intel XPU 추론 메인 함수"""
-    print("=== RTMW-x Intel XPU WholeBody 포즈 추론 ===")
-    print("RTMW-x: Real-Time Multi-Person WholeBody Pose Estimation")
+    """RTMW-l Intel XPU 추론 메인 함수"""
+    print("=== RTMW-l Intel XPU WholeBody 포즈 추론 ===")
+    print("RTMW-l: Real-Time Multi-Person WholeBody Pose Estimation")
     print("키포인트: Body(17) + Face(68) + Hands(48) = 133개")
     
     # Intel XPU 가용성 확인
@@ -113,7 +113,7 @@ def main():
         print("❌ RTMW 모델을 찾을 수 없습니다.")
         return
     
-    print(f"📏 RTMW-x 입력 크기: {RTMW_INPUT_SIZE}")
+    print(f"📏 RTMW-l 입력 크기: {RTMW_INPUT_SIZE}")
     
     try:
         # 검출기, 포즈 추정기, 시각화기 초기화
@@ -121,7 +121,7 @@ def main():
         person_detector = SimplePersonDetector(device=device)
         rtmw_estimator = RTMWXEstimator(model_path, device=device)
         visualizer = RTMWVisualizer()
-        print(f"✅ RTMW-x 모델 로딩 완료: {model_description}")
+        print(f"✅ RTMW-l 모델 로딩 완료: {model_description}")
         
         # 웹캠 초기화
         cap = cv2.VideoCapture(0)
@@ -129,7 +129,7 @@ def main():
             print("❌ 웹캠을 열 수 없습니다.")
             return
         
-        print("RTMW-x 웹캠 추론 시작 (ESC 키로 종료)")
+        print("RTMW-l 웹캠 추론 시작 (ESC 키로 종료)")
         print(f"사용 모델: {model_description}")
         print(f"입력 해상도: {RTMW_INPUT_SIZE}")
         
@@ -192,7 +192,7 @@ def main():
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='RTMW-x WholeBody 포즈 추정')
+    parser = argparse.ArgumentParser(description='RTMW-l WholeBody 포즈 추정')
     parser.add_argument('--image', type=str, default=None,
                         help='테스트할 이미지 파일 경로 (지정하지 않으면 웹캠 사용)')
     

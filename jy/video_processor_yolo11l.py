@@ -1129,8 +1129,8 @@ class VideoProcessorYOLO11L:
 def main():
     """메인 실행 함수"""
     # 모델 경로 설정
-    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
-    rtmw_checkpoint = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
+    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py"
+    rtmw_checkpoint = "../models/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
     
     try:
         print("🎬 YOLO11L 영상 처리기 테스트")

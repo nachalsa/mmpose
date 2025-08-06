@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Configuration Module for RTMW-x
-RTMW-x 설정 관리 모듈 - 통합 모델 관리
+Configuration Module for RTMW-l
+RTMW-l 설정 관리 모듈 - 통합 모델 관리
 """
 
 import os
@@ -42,18 +42,18 @@ YOLO_MODEL_CONFIG = {
 # RTMW 모델 옵션들
 RTMW_MODEL_OPTIONS = [
     {
-        "filename": "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
-        "path": os.path.join(MODELS_DIR, "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"),
-        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
-        "description": "RTMW-x 384x288 (최고 성능)",
+        "filename": "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20231122.pth",
+        "path": os.path.join(MODELS_DIR, "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20231122.pth"),
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20231122.pth",
+        "description": "RTMW-l 384x288 (균형, 기본 모델)",
         "input_size": (384, 288),
         "keypoints": 133
     },
     {
-        "filename": "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth",
-        "path": os.path.join(MODELS_DIR, "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"),
-        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth",
-        "description": "RTMW-l 384x288 (균형)",
+        "filename": "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
+        "path": os.path.join(MODELS_DIR, "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"),
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
+        "description": "RTMW-x 384x288 (최고 성능)",
         "input_size": (384, 288),
         "keypoints": 133
     }
@@ -117,7 +117,7 @@ DEFAULT_CONF_THRESH = 0.5
 # FPS 계산 설정
 FPS_UPDATE_INTERVAL = 30
 
-# 키포인트 범위 설정 (RTMW-x 133 keypoints)
+# 키포인트 범위 설정 (RTMW-l 133 keypoints)
 BODY_KEYPOINTS_RANGE = (0, 17)      # Body: 17개
 FACE_KEYPOINTS_RANGE = (17, 85)     # Face: 68개 (17+68=85)
 HANDS_KEYPOINTS_RANGE = (85, 133)   # Hands: 48개 (85+48=133)
@@ -163,7 +163,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # 초기화 로그
 if __name__ == "__main__":
-    print("📁 RTMW-x 설정 정보:")
+    print("📁 RTMW-l 설정 정보:")
     print(f"   - 프로젝트 루트: {PROJECT_ROOT}")
     print(f"   - 모델 디렉토리: {MODELS_DIR}")
     print(f"   - 데이터 디렉토리: {DATA_DIR}")

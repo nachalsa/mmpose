@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-RTMW-x PyTorch Pose Estimator
-RTMW-x PyTorch 기반 포즈 추정기 (SimCC 디코더 포함)
+RTMW-l PyTorch Pose Estimator
+RTMW-l PyTorch 기반 포즈 추정기 (SimCC 디코더 포함)
 """
 
 import torch
@@ -816,14 +816,14 @@ class RTMWXEstimator:
 
 def test_rtmw_pytorch_estimator():
     """RTMW PyTorch 추정기 테스트 (실제 모델)"""
-    print("=== RTMW-x PyTorch 추정기 테스트 (실제 백본+헤드) ===")
+    print("=== RTMW-l PyTorch 추정기 테스트 (실제 백본+헤드) ===")
     
     # 실제 모델 경로
-    model_path = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
+    model_path = "../models/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
     
     try:
         # 추정기 초기화
-        print(f"🚀 RTMW-x 추정기 초기화 중...")
+        print(f"🚀 RTMW-l 추정기 초기화 중...")
         estimator = RTMWXEstimator(model_path, device='cpu')
         
         # 모델 정보 출력

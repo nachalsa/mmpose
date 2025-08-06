@@ -166,7 +166,7 @@ class StreamlinedVideoProcessor:
             self.logger.info("   ultralytics가 자동으로 다운로드할 예정")
             return yolo_config["filename"]
 
-    def _ensure_rtmw_model(self, model_name: str = "rtmw-x") -> str:
+    def _ensure_rtmw_model(self, model_name: str = "rtmw-l") -> str:
         """RTMW 모델 파일 확인 및 다운로드"""
         rtmw_config = None
         for config in RTMW_MODEL_OPTIONS:

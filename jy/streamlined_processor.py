@@ -92,8 +92,8 @@ class StreamlinedVideoProcessor:
     """HDF5용 간소화된 비디오 처리기 (WORD + SEN 지원)"""
     
     def __init__(self, 
-                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
-                 rtmw_model_name: str = "rtmw-x"):  # 모델명으로 선택
+                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py",
+                 rtmw_model_name: str = "rtmw-l"):  # 모델명으로 선택
         
         self.logger = logging.getLogger(__name__)
         self.keypoint_scale = 8  # 키포인트 x,y 좌표 8배 스케일링
@@ -174,7 +174,7 @@ class StreamlinedVideoProcessor:
             self.logger.info("   ultralytics가 자동으로 다운로드할 예정")
             return yolo_config["filename"]
 
-    def _ensure_rtmw_model(self, model_name: str = "rtmw-x") -> str:
+    def _ensure_rtmw_model(self, model_name: str = "rtmw-l") -> str:
         """RTMW 모델 파일 확인 및 다운로드"""
         # 모델명으로 설정 찾기
         rtmw_config = None

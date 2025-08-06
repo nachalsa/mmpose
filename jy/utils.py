@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Utility Functions for RTMW-x
-RTMW-x 유틸리티 함수들
+Utility Functions for RTMW-l
+RTMW-l 유틸리티 함수들
 """
 
 import os

@@ -95,8 +95,8 @@ class EnhancedStreamlinedVideoProcessor:
     """향상된 스트림라인 비디오 처리기 - CPU YOLO 옵션 지원"""
     
     def __init__(self, 
-                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
-                 rtmw_model_name: str = "rtmw-x",
+                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py",
+                 rtmw_model_name: str = "rtmw-l",
                  yolo_device: str = "xpu",  # "xpu" 또는 "cpu"
                  pose_device: str = "xpu"):  # "xpu" 또는 "cpu"
         
@@ -167,7 +167,7 @@ class EnhancedStreamlinedVideoProcessor:
             self.logger.info("   ultralytics가 자동으로 다운로드할 예정")
             return yolo_config["filename"]
 
-    def _ensure_rtmw_model(self, model_name: str = "rtmw-x") -> str:
+    def _ensure_rtmw_model(self, model_name: str = "rtmw-l") -> str:
         """RTMW 모델 파일 확인 및 다운로드"""
         rtmw_config = None
         for config in RTMW_MODEL_OPTIONS:
@@ -901,12 +901,12 @@ def main():
 
     # RTMW 모델 선택
     print("\n사용할 RTMW 모델을 선택하세요:")
-    print("1. RTMW-x (최고 성능, 기본값)")
-    print("2. RTMW-l (균형)")
+    print("1. RTMW-l (균형, 기본값)")
+    print("2. RTMW-x (최고 성능)")
     
     model_choice = input("모델 선택 (1-2, 기본값: 1): ").strip()
-    rtmw_model_map = {'1': 'rtmw-x', '2': 'rtmw-dw-x-l', '': 'rtmw-x'}
-    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-x')
+    rtmw_model_map = {'1': 'rtmw-l', '2': 'rtmw-x', '': 'rtmw-l'}
+    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-l')
     print(f"✅ 선택된 모델: {rtmw_model_name}")
 
     # 방향 선택

@@ -478,8 +478,8 @@ def main():
     """메인 함수"""
     # 설정
     data_root = "/home/ty/rtmw/02/mmpose/jy/data"
-    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
-    rtmw_checkpoint = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
+    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py"
+    rtmw_checkpoint = "../models/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
     output_root = "sign_language_dataset"
     
     # 처리기 생성

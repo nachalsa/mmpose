@@ -14,8 +14,8 @@ matplotlib.use('Agg')  # GUI 없이 실행
 def test_visualization():
     """시각화 기능 테스트"""
     # 모델 경로 설정
-    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
-    rtmw_checkpoint = "../models/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"
+    rtmw_config = "../configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py"
+    rtmw_checkpoint = "../models/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"
     
     # 처리기 생성
     processor = VideoProcessorYOLO11L(
