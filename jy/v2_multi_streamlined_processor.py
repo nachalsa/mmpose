@@ -169,11 +169,20 @@ class EnhancedStreamlinedVideoProcessor:
 
     def _ensure_rtmw_model(self, model_name: str = "rtmw-l") -> str:
         """RTMW 모델 파일 확인 및 다운로드"""
+        # 모델명으로 설정 찾기 - rtmw-l은 실제로는 rtmw-dw-x-l 파일명을 가짐
         rtmw_config = None
-        for config in RTMW_MODEL_OPTIONS:
-            if model_name in config["filename"]:
-                rtmw_config = config
-                break
+        if model_name == "rtmw-l" or "dw-x-l" in model_name:
+            # rtmw-l 요청시 rtmw-dw-x-l 모델 사용
+            for config in RTMW_MODEL_OPTIONS:
+                if "dw-x-l" in config["filename"]:
+                    rtmw_config = config
+                    break
+        else:
+            # 다른 모델들은 기존 로직 사용
+            for config in RTMW_MODEL_OPTIONS:
+                if model_name in config["filename"]:
+                    rtmw_config = config
+                    break
         
         if not rtmw_config:
             self.logger.error(f"❌ 알 수 없는 RTMW 모델명: {model_name}")
@@ -901,8 +910,8 @@ def main():
 
     # RTMW 모델 선택
     print("\n사용할 RTMW 모델을 선택하세요:")
-    print("1. RTMW-l (균형, 기본값)")
-    print("2. RTMW-x (최고 성능)")
+    print("1. RTMW-L (최고 성능, 기본값)")
+    print("2. RTMW-X (고성능)")
     
     model_choice = input("모델 선택 (1-2, 기본값: 1): ").strip()
     rtmw_model_map = {'1': 'rtmw-l', '2': 'rtmw-x', '': 'rtmw-l'}

@@ -42,10 +42,10 @@ YOLO_MODEL_CONFIG = {
 # RTMW 모델 옵션들
 RTMW_MODEL_OPTIONS = [
     {
-        "filename": "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20231122.pth",
-        "path": os.path.join(MODELS_DIR, "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20231122.pth"),
-        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288-20231122.pth",
-        "description": "RTMW-l 384x288 (균형, 기본 모델)",
+        "filename": "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth",
+        "path": os.path.join(MODELS_DIR, "rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth"),
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-20231122.pth",
+        "description": "RTMW-L 384x288 (최고 성능, 기본 모델)",
         "input_size": (384, 288),
         "keypoints": 133
     },
@@ -53,7 +53,7 @@ RTMW_MODEL_OPTIONS = [
         "filename": "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
         "path": os.path.join(MODELS_DIR, "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth"),
         "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288-f840f204_20231122.pth",
-        "description": "RTMW-x 384x288 (최고 성능)",
+        "description": "RTMW-X 384x288 (고성능)",
         "input_size": (384, 288),
         "keypoints": 133
     }
