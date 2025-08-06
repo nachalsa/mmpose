@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-최적화된 비디오 처리기 - CPU YOLO + GPU 배치 RTMW 지원
+최적화된 비디오 처리기 - PyTorch 2.6 호환성 포함
 """
 
 import os
@@ -20,7 +20,83 @@ import re
 import multiprocessing as mp
 import queue
 import threading
+import torch
+import torch.serialization
 
+# PyTorch 2.6 호환성 패치
+def apply_pytorch_patch():
+    """PyTorch 2.6 호환성 패치"""
+    if torch.__version__.startswith('2.6'):
+        try:
+            import numpy.core.multiarray
+            import collections
+            safe_globals = [
+                numpy.core.multiarray._reconstruct,
+                numpy.ndarray,
+                numpy.dtype,
+                collections.OrderedDict
+            ]
+            torch.serialization.add_safe_globals(safe_globals)
+            print(f"✅ PyTorch {torch.__version__} 호환성 패치 적용 완료")
+        except Exception as e:
+            print(f"⚠️ 패치 실패: {e}")
+
+# 패치 자동 적용
+apply_pytorch_patch()
+
+# 설정 및 MMPose 관련 임포트
+from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
+
+# PyTorch 2.6에서 안전한 전역 객체 허용
+def apply_pytorch_patch():
+    """PyTorch 2.6 호환성을 위한 패치 적용"""
+    try:
+        # numpy 관련 전역 객체들을 안전한 목록에 추가
+        safe_globals = [
+            'numpy.core.multiarray._reconstruct',
+            'numpy.ndarray',
+            'numpy.dtype',
+            'numpy.core.multiarray.scalar',
+            'collections.OrderedDict',
+            'torch._utils._rebuild_tensor_v2'
+        ]
+        
+        # 각 전역 객체를 허용 목록에 추가
+        for global_name in safe_globals:
+            try:
+                # 동적으로 모듈과 객체를 가져와서 추가
+                module_path, obj_name = global_name.rsplit('.', 1)
+                
+                if module_path == 'numpy.core.multiarray':
+                    import numpy.core.multiarray
+                    obj = getattr(numpy.core.multiarray, obj_name)
+                elif module_path == 'numpy':
+                    import numpy
+                    obj = getattr(numpy, obj_name)
+                elif module_path == 'collections':
+                    import collections
+                    obj = getattr(collections, obj_name)
+                elif module_path == 'torch._utils':
+                    import torch._utils
+                    obj = getattr(torch._utils, obj_name)
+                else:
+                    continue
+                    
+                torch.serialization.add_safe_globals([obj])
+                print(f"✅ 안전한 전역 객체 추가: {global_name}")
+                
+            except (ImportError, AttributeError) as e:
+                print(f"⚠️ 전역 객체 추가 실패: {global_name} - {e}")
+                
+    except Exception as e:
+        print(f"⚠️ 패치 적용 중 오류: {e}")
+        print("💡 대안: PyTorch 버전을 2.5.1로 다운그레이드하세요")
+
+# 모듈 임포트 시 자동으로 패치 적용
+if torch.__version__.startswith('2.6'):
+    print(f"🔧 PyTorch {torch.__version__} 감지, 호환성 패치 적용 중...")
+    apply_pytorch_patch()
+    
 # 설정 및 MMPose 관련 임포트
 from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
 
