@@ -32,6 +32,8 @@ class ParallelBatchProcessor(BatchProcessor):
         
         super().__init__(data_root, output_dir, batch_size, rtmw_model_name, direction, item_types)
         
+        self.rtmw_config_path = rtmw_config_path
+
         # 병렬 처리 설정
         self.max_workers = self._determine_optimal_workers(max_workers, gpu_per_worker)
         self.gpu_per_worker = gpu_per_worker
@@ -86,7 +88,10 @@ class ParallelBatchProcessor(BatchProcessor):
         
         try:
             # 각 프로세스에서 독립적으로 처리기 초기화
-            processor = StreamlinedVideoProcessor(rtmw_model_name=processor_config['rtmw_model_name'])
+            processor = StreamlinedVideoProcessor(
+                rtmw_model_name=processor_config['rtmw_model_name'],
+                rtmw_config_path=processor_config['rtmw_config_path'] # 전달받은 경로 사용
+            )
             
             # 출력 디렉토리 설정
             video_output_dir = Path(processor_config['video_output_dir'])
@@ -232,6 +237,7 @@ class ParallelBatchProcessor(BatchProcessor):
         # 프로세서 설정 준비
         processor_config = {
             'rtmw_model_name': self.rtmw_model_name,
+            'rtmw_config_path': self.rtmw_config_path, # 저장해둔 경로 추가
             'video_output_dir': str(self.video_output_dir),
             'hdf5_output_dir': str(self.hdf5_output_dir),
             'item_types': self.item_types,

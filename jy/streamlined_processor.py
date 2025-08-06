@@ -421,8 +421,8 @@ class BatchProcessor:
                  direction: str = "F",
                  item_types: List[str] = ["WORD"]):  # 처리할 아이템 타입 목록
         
-        self.data_root = Path(data_root)
-        self.output_dir = Path(output_dir)
+        self.data_root = Path(data_root).resolve()
+        self.output_dir = Path(output_dir).resolve()
         self.batch_size = batch_size
         self.rtmw_model_name = rtmw_model_name
         self.direction = direction.upper()  # F, U, L, R, D 방향
