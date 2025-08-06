@@ -956,12 +956,12 @@ def main():
     print("2. 하이브리드 (YOLO: CPU, Pose: GPU) - GPU 메모리 절약, 권장")
     print("3. CPU 전체 사용 (YOLO: CPU, Pose: CPU) - GPU 없을 때")
     
-    device_choice = input("디바이스 선택 (1-3, 기본값: 2): ").strip()
+    device_choice = input("디바이스 선택 (1-3, 기본값: 1): ").strip()
     device_map = {
         '1': ('xpu', 'xpu'),
         '2': ('cpu', 'xpu'),   # 기본값: YOLO CPU, Pose GPU
         '3': ('cpu', 'cpu'),
-        '': ('cpu', 'xpu')     # 기본값
+        '': ('xpu', 'xpu')     # 기본값
     }
     yolo_device, pose_device = device_map.get(device_choice, ('cpu', 'xpu'))
     print(f"✅ 디바이스 설정: YOLO={yolo_device.upper()}, Pose={pose_device.upper()}")
