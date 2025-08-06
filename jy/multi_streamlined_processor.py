@@ -95,10 +95,14 @@ class StreamlinedVideoProcessor:
     
     def __init__(self, 
                  rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
-                 rtmw_model_name: str = "rtmw-x"):
+                 rtmw_model_name: str = "rtmw-x",
+                 yolo_device: str = "cpu",  # CPU로 변경
+                 pose_device: str = "xpu"): # Pose는 GPU 유지
         
         self.logger = logging.getLogger(__name__)
         self.keypoint_scale = 8
+        self.yolo_device = yolo_device
+        self.pose_device = pose_device
         
         try:
             base_dir = Path(__file__).parent.parent
@@ -112,11 +116,13 @@ class StreamlinedVideoProcessor:
         self.inferencer = YOLO11LXPUHybridInferencer(
             rtmw_config=rtmw_config_path,
             rtmw_checkpoint=rtmw_model_path,
-            detection_device='xpu',
-            pose_device='xpu',
+            detection_device=yolo_device,  # CPU 사용
+            pose_device=pose_device,       # GPU 유지
             optimize_for_accuracy=True
         )
-        self.logger.info("✅ 스트림라인 비디오 처리기 초기화 완료")
+        
+        device_info = f"YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()}"
+        self.logger.info(f"✅ 스트림라인 비디오 처리기 초기화 완료 ({device_info})")
 
     def _ensure_yolo_model(self) -> str:
         """YOLO 모델 파일 확인 및 다운로드"""
@@ -459,15 +465,19 @@ def gpu_inference_worker(
     result_queue: mp.Queue, 
     rtmw_model_name: str, 
     rtmw_config_path: str,
-    gpu_batch_size: int = 8  # GPU 배치 크기 추가
+    gpu_batch_size: int = 8,
+    yolo_device: str = "cpu",  # YOLO CPU 사용
+    pose_device: str = "xpu"   # Pose GPU 유지
 ):
-    """GPU에서 배치 추론을 수행하는 프로세스"""
-    print(f"🚀 GPU Inference Worker 시작 (배치 크기: {gpu_batch_size})...")
+    """GPU/CPU 하이브리드 추론을 수행하는 프로세스"""
+    print(f"🚀 하이브리드 Inference Worker 시작 (YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()}, 배치: {gpu_batch_size})...")
     
     # 이 프로세스 내에서 자체적으로 처리기 초기화
     processor = StreamlinedVideoProcessor(
         rtmw_model_name=rtmw_model_name,
-        rtmw_config_path=rtmw_config_path
+        rtmw_config_path=rtmw_config_path,
+        yolo_device=yolo_device,
+        pose_device=pose_device
     )
     
     batch_jobs = []
@@ -496,10 +506,10 @@ def gpu_inference_worker(
                 time.sleep(0.1)
                 
         except Exception as e:
-            print(f"💥 GPU Worker 오류 발생: {e}")
+            print(f"💥 하이브리드 Worker 오류 발생: {e}")
             continue
             
-    print("👋 GPU Inference Worker 종료.")
+    print("👋 하이브리드 Inference Worker 종료.")
 
 def process_batch(processor, batch_jobs, result_queue):
     """배치 작업 처리"""
@@ -584,7 +594,9 @@ class BatchProcessor:
                  direction: str = "F",
                  item_types: List[str] = ["WORD"],
                  num_cpu_workers: int = 4,
-                 gpu_batch_size: int = 8):  # GPU 배치 크기 추가
+                 gpu_batch_size: int = 8,
+                 yolo_device: str = "cpu",    # YOLO CPU 사용
+                 pose_device: str = "xpu"):   # Pose GPU 유지
         
         self.data_root = Path(data_root).resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -595,7 +607,11 @@ class BatchProcessor:
         self.item_types = [t.upper() for t in item_types]
         self.keypoint_scale = 8
         
-        # GPU 최적화 설정 추가
+        # 디바이스 설정 추가
+        self.yolo_device = yolo_device
+        self.pose_device = pose_device
+        
+        # GPU 최적화 설정
         self.num_cpu_workers = min(num_cpu_workers, os.cpu_count())
         self.gpu_batch_size = gpu_batch_size
         
@@ -617,6 +633,8 @@ class BatchProcessor:
         self.hdf5_output_dir.mkdir(parents=True, exist_ok=True)
         
         self.logger.info("✅ GPU 최적화 배치 처리기 초기화 완료")
+        self.logger.info(f"   - YOLO 디바이스: {yolo_device.upper()}")
+        self.logger.info(f"   - Pose 디바이스: {pose_device.upper()}")
         self.logger.info(f"   - CPU 워커 수: {self.num_cpu_workers}")
         self.logger.info(f"   - GPU 배치 크기: {self.gpu_batch_size}")
 
@@ -696,9 +714,10 @@ class BatchProcessor:
         for i, (item_type, item_id, video_path) in enumerate(all_videos):
             task_queue.put((i, item_type, item_id, video_path))
         
-        # 3. GPU 추론 프로세스 생성 (GPU 배치 크기 적용)
+        # 3. GPU/CPU 하이브리드 추론 프로세스 생성
         gpu_worker = mp.Process(target=gpu_inference_worker, args=(
-            task_queue, result_queue, self.rtmw_model_name, self.rtmw_config_path, self.gpu_batch_size
+            task_queue, result_queue, self.rtmw_model_name, self.rtmw_config_path, 
+            self.gpu_batch_size, self.yolo_device, self.pose_device  # 디바이스 설정 전달
         ))
         gpu_worker.start()
 
@@ -709,7 +728,8 @@ class BatchProcessor:
 
         # 4. 진행률 표시 및 대기
         successful_keys_map = {}
-        with tqdm(total=len(all_videos), desc=f"GPU 병렬 처리 (배치:{self.gpu_batch_size})") as pbar:
+        device_info = f"YOLO:{self.yolo_device.upper()}, Pose:{self.pose_device.upper()}"
+        with tqdm(total=len(all_videos), desc=f"하이브리드 병렬 처리 ({device_info})") as pbar:
             for _ in range(len(all_videos)):
                 job_id, item_type, item_id, video_path, arrays = result_queue.get()
                 if arrays:
@@ -930,8 +950,29 @@ def main():
     direction = direction_map.get(direction_choice, 'F')
     print(f"✅ 선택된 방향: {direction}")
     
-    # CPU 워커 수 입력
-    default_cpu_workers = max(1, os.cpu_count() // 2)
+    # 디바이스 설정 추가
+    print("\n🔧 디바이스 설정:")
+    print("1. GPU 전체 사용 (YOLO: GPU, Pose: GPU) - 최고 성능")
+    print("2. 하이브리드 (YOLO: CPU, Pose: GPU) - GPU 메모리 절약, 권장")
+    print("3. CPU 전체 사용 (YOLO: CPU, Pose: CPU) - GPU 없을 때")
+    
+    device_choice = input("디바이스 선택 (1-3, 기본값: 2): ").strip()
+    device_map = {
+        '1': ('xpu', 'xpu'),
+        '2': ('cpu', 'xpu'),   # 기본값: YOLO CPU, Pose GPU
+        '3': ('cpu', 'cpu'),
+        '': ('cpu', 'xpu')     # 기본값
+    }
+    yolo_device, pose_device = device_map.get(device_choice, ('cpu', 'xpu'))
+    print(f"✅ 디바이스 설정: YOLO={yolo_device.upper()}, Pose={pose_device.upper()}")
+    
+    # CPU 워커 수 자동 조정
+    if yolo_device == 'cpu':
+        default_cpu_workers = min(8, os.cpu_count())  # YOLO CPU 사용시 더 많은 워커
+        print(f"💡 YOLO CPU 사용: CPU 워커 수를 {default_cpu_workers}개로 권장")
+    else:
+        default_cpu_workers = max(1, os.cpu_count() // 2)
+    
     cpu_workers_input = input(f"\n사용할 CPU 워커 수를 입력하세요 (기본값: {default_cpu_workers}): ").strip()
     try:
         num_cpu_workers = int(cpu_workers_input) if cpu_workers_input else default_cpu_workers
@@ -939,8 +980,13 @@ def main():
         num_cpu_workers = default_cpu_workers
     print(f"✅ CPU 워커 수: {num_cpu_workers}")
     
-    # GPU 배치 크기 입력 추가
-    default_gpu_batch = 8
+    # GPU 배치 크기 자동 조정
+    if yolo_device == 'cpu':
+        default_gpu_batch = 16  # YOLO CPU 사용시 더 큰 배치
+        print(f"💡 YOLO CPU 사용: GPU 배치 크기를 {default_gpu_batch}로 권장")
+    else:
+        default_gpu_batch = 8
+        
     gpu_batch_input = input(f"\nGPU 배치 크기를 입력하세요 (기본값: {default_gpu_batch}): ").strip()
     try:
         gpu_batch_size = int(gpu_batch_input) if gpu_batch_input else default_gpu_batch
@@ -949,16 +995,18 @@ def main():
     print(f"✅ GPU 배치 크기: {gpu_batch_size}")
 
     # 배치 처리기 초기화
-    print("\n📥 GPU 최적화 모델 초기화 중...")
+    print(f"\n📥 하이브리드 모델 초기화 중... (YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()})")
     try:
         batch_processor = BatchProcessor(
             rtmw_model_name=rtmw_model_name, 
             direction=direction,
             item_types=item_types,
             num_cpu_workers=num_cpu_workers,
-            gpu_batch_size=gpu_batch_size  # GPU 배치 크기 추가
+            gpu_batch_size=gpu_batch_size,
+            yolo_device=yolo_device,  # 디바이스 설정 추가
+            pose_device=pose_device
         )
-        print("✅ GPU 최적화 초기화 완료!")
+        print("✅ 하이브리드 초기화 완료!")
     except Exception as e:
         print(f"❌ 초기화 실패: {e}")
         return
