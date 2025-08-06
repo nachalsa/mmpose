@@ -418,6 +418,7 @@ class BatchProcessor:
                  output_dir: str = "sign_language_dataset",
                  batch_size: int = 250,
                  rtmw_model_name: str = "rtmw-x",
+                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py", 
                  direction: str = "F",
                  item_types: List[str] = ["WORD"]):  # 처리할 아이템 타입 목록
         
@@ -459,7 +460,10 @@ class BatchProcessor:
         
         # 스트림라인 처리기 초기화
         self.logger.info(f"🚀 모델 초기화 시작 (RTMW: {rtmw_model_name}, 방향: {self.direction}, 타입: {', '.join(self.item_types)})")
-        self.processor = StreamlinedVideoProcessor(rtmw_model_name=rtmw_model_name)
+        self.processor = StreamlinedVideoProcessor(
+            rtmw_model_name=rtmw_model_name,
+            rtmw_config_path=rtmw_config_path # 여기를 추가
+        )
         self.logger.info("✅ 배치 처리기 초기화 완료")
 
     def extract_item_info(self, video_path: Path) -> Optional[Tuple[str, int]]:

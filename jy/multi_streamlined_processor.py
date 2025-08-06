@@ -25,12 +25,13 @@ class ParallelBatchProcessor(BatchProcessor):
                  output_dir: str = "sign_language_dataset",
                  batch_size: int = 250,
                  rtmw_model_name: str = "rtmw-x",
+                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
                  direction: str = "F",
                  item_types: List[str] = ["WORD"],
                  max_workers: int = None,
                  gpu_per_worker: float = 0.3):  # 각 워커당 GPU 메모리 비율
         
-        super().__init__(data_root, output_dir, batch_size, rtmw_model_name, direction, item_types)
+        super().__init__(data_root, output_dir, batch_size, rtmw_model_name, rtmw_config_path, direction, item_types)
         
         self.rtmw_config_path = rtmw_config_path
 
@@ -400,9 +401,11 @@ def main():
             print("잘못된 입력, 자동 설정 사용")
     
     try:
+        default_rtmw_config_path = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py"
         # 기본 설정으로 초기화 (실제 사용 시 선택된 값들 사용)
         batch_processor = ParallelBatchProcessor(
             rtmw_model_name='rtmw-x',
+            rtmw_config_path=default_rtmw_config_path,
             direction='F', 
             item_types=['WORD'],
             max_workers=max_workers,
