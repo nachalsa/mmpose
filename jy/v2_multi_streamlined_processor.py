@@ -93,8 +93,8 @@ class OptimizedInferencer:
     def __init__(self, 
                  rtmw_config_path: str,
                  rtmw_model_path: str,
-                 yolo_device: str = 'cpu',  # 'cpu' or 'cuda'
-                 pose_device: str = 'cuda',
+                 yolo_device: str = 'cpu',  # 'cpu' or 'xpu'
+                 pose_device: str = 'xpu',
                  batch_size: int = 8):
         
         self.logger = logging.getLogger(__name__)
@@ -147,15 +147,6 @@ class OptimizedInferencer:
         try:
             from mmpose.apis import MMPoseInferencer
             # MMPose 버전별 호환성 처리
-            # 오류 회피
-            from mmengine.runner.checkpoint import CheckpointLoader
-
-            CheckpointLoader.load_from_local = staticmethod(
-                lambda filename, map_location: torch.load(
-                    filename, map_location=map_location, weights_only=False
-                )
-            )
-
             try:
                 # 최신 버전 (pose2d 파라미터 사용)
                 self.rtmw_inferencer = MMPoseInferencer(
@@ -327,7 +318,7 @@ class OptimizedVideoProcessor:
             rtmw_config_path=rtmw_config_path,
             rtmw_model_path=rtmw_model_path,
             yolo_device=yolo_device,
-            pose_device='cuda',
+            pose_device='xpu',
             batch_size=batch_size
         )
         
@@ -783,6 +774,7 @@ class OptimizedBatchProcessor:
             with h5py.File(frames_h5_path, 'w') as f_frames, \
                  h5py.File(poses_h5_path, 'w') as f_poses:
                 
+                # HDF5 메타데이터 (기존과 동일한 구조 유지)
                 batch_metadata = {
                     'folder_name': folder_name,
                     'folder_batch_idx': folder_batch_idx,
@@ -791,6 +783,7 @@ class OptimizedBatchProcessor:
                     'direction': self.direction,
                     'video_count': len(successful_keys),
                     'creation_time': str(datetime.now())
+                    # 최적화 관련 정보는 제거 (기존과 동일한 구조 유지)
                 }
                 f_frames.attrs.update(batch_metadata)
                 f_poses.attrs.update(batch_metadata)
@@ -943,8 +936,8 @@ def main():
     print("2. GPU (빠름, 메모리 많이 사용) - 기본값")
     
     yolo_device_choice = input("YOLO 디바이스 (1-2, 기본값: 2): ").strip()
-    yolo_device_map = {'1': 'cpu', '2': 'cuda', '': 'cuda'}
-    yolo_device = yolo_device_map.get(yolo_device_choice, 'cuda')
+    yolo_device_map = {'1': 'cpu', '2': 'xpu', '': 'xpu'}
+    yolo_device = yolo_device_map.get(yolo_device_choice, 'xpu')
     print(f"✅ YOLO 디바이스: {yolo_device}")
     
     # 추론 배치 크기 선택 (새로 추가!)
