@@ -94,7 +94,7 @@ class StreamlinedVideoProcessor:
     """HDF5용 간소화된 비디오 처리기 (WORD + SEN 지원) - ONNX 버전"""
     
     def __init__(self, 
-                 rtmw_model_name: str = "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+                 rtmw_model_name: str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx",
                  yolo_device: str = "auto",
                  pose_device: str = "auto"):
         
@@ -117,7 +117,7 @@ class StreamlinedVideoProcessor:
         device_info = f"YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()} (ONNX)"
         self.logger.info(f"✅ 스트림라인 비디오 처리기 초기화 완료 ({device_info})")
 
-    def _ensure_rtmw_onnx_model(self, model_name: str = "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx") -> str:
+    def _ensure_rtmw_onnx_model(self, model_name: str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx") -> str:
         """RTMW ONNX 모델 파일 확인 및 다운로드"""
         # 모델 디렉토리 생성
         models_dir = Path(MODELS_DIR)
@@ -140,37 +140,63 @@ class StreamlinedVideoProcessor:
         # 기본 경로로 다운로드 시도
         model_path = possible_paths[0]  # models_dir / model_name
         
-        # ONNX 모델 다운로드 URL
+        # ONNX 모델 다운로드 URL (ZIP 파일 포함)
         onnx_model_urls = {
-            "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx": 
-            "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"
+            "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx": {
+                "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip",
+                "type": "zip",
+                "extracted_name": "end2end.onnx"
+            },
+            "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx": {
+                "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+                "type": "direct"
+            }
         }
         
         if model_name in onnx_model_urls:
             self.logger.info(f"📥 RTMW ONNX 모델 다운로드 시작: {model_name}")
             
             try:
-                download_url = onnx_model_urls[model_name]
+                model_info = onnx_model_urls[model_name]
+                download_url = model_info["url"]
+                model_type = model_info.get("type", "direct")
+                
                 self.logger.info(f"🔄 다운로드 중: {download_url}")
+                self.logger.info(f"   타입: {'ZIP 압축 파일' if model_type == 'zip' else '직접 다운로드'}")
                 
-                def download_progress_hook(block_num, block_size, total_size):
-                    if total_size > 0:
-                        percent = min(100, (block_num * block_size * 100) // total_size)
-                        if block_num % 50 == 0:  # 주기적으로 출력
-                            print(f"\r   진행률: {percent}%", end='', flush=True)
-                
-                urllib.request.urlretrieve(download_url, model_path, download_progress_hook)
-                print()  # 새 줄
-                
-                if model_path.exists() and model_path.stat().st_size > 1024 * 1024:
-                    self.logger.info(f"✅ RTMW ONNX 모델 다운로드 완료: {model_path}")
-                    self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
-                    return str(model_path)
+                if model_type == "zip":
+                    # ZIP 파일 처리
+                    from onnx_inferencer import download_and_extract_zip
+                    extracted_name = model_info["extracted_name"]
+                    success = download_and_extract_zip(download_url, str(model_path), extracted_name)
+                    
+                    if success and model_path.exists():
+                        self.logger.info(f"✅ RTMW ONNX 모델 압축 해제 완료: {model_path}")
+                        self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
+                        return str(model_path)
+                    else:
+                        self.logger.error(f"❌ ZIP 압축 해제 실패: {model_path}")
+                        return str(model_path)
                 else:
-                    self.logger.error(f"❌ 다운로드된 파일이 유효하지 않음: {model_path}")
-                    if model_path.exists():
-                        model_path.unlink()
-                    return str(model_path)
+                    # 직접 다운로드
+                    def download_progress_hook(block_num, block_size, total_size):
+                        if total_size > 0:
+                            percent = min(100, (block_num * block_size * 100) // total_size)
+                            if block_num % 50 == 0:  # 주기적으로 출력
+                                print(f"\r   진행률: {percent}%", end='', flush=True)
+                    
+                    urllib.request.urlretrieve(download_url, model_path, download_progress_hook)
+                    print()  # 새 줄
+                    
+                    if model_path.exists() and model_path.stat().st_size > 1024 * 1024:
+                        self.logger.info(f"✅ RTMW ONNX 모델 다운로드 완료: {model_path}")
+                        self.logger.info(f"   파일 크기: {model_path.stat().st_size / (1024*1024):.1f} MB")
+                        return str(model_path)
+                    else:
+                        self.logger.error(f"❌ 다운로드된 파일이 유효하지 않음: {model_path}")
+                        if model_path.exists():
+                            model_path.unlink()
+                        return str(model_path)
                 
             except Exception as e:
                 self.logger.error(f"❌ RTMW ONNX 모델 다운로드 실패: {e}")
@@ -426,7 +452,7 @@ class StreamlinedVideoProcessor:
 def onnx_inference_worker(
     task_queue: mp.Queue, 
     result_queue: mp.Queue, 
-    rtmw_model_name: str = "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+    rtmw_model_name: str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx",
     gpu_batch_size: int = 8,
     yolo_device: str = "auto",
     pose_device: str = "auto"
@@ -550,7 +576,7 @@ class BatchProcessor:
                  data_root: str = "data/1.Training",
                  output_dir: str = "sign_language_dataset",
                  batch_size: int = 250,
-                 rtmw_model_name: str = "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+                 rtmw_model_name: str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx",
                  direction: str = "F",
                  item_types: List[str] = ["WORD"],
                  num_cpu_workers: int = 4,
@@ -874,18 +900,20 @@ def main():
     print(f"✅ 선택된 타입: {', '.join(item_types)}")
 
     print("\n사용할 RTMW ONNX 모델을 선택하세요:")
-    print("1. RTMW-L ONNX (균형된 성능, 기본값)")
-    print("2. RTMW-X ONNX (최고 성능)")
+    print("1. RTMW-DW-X-L ONNX (최신 고성능 모델, 기본값)")
+    print("2. RTMW-L ONNX (균형된 성능)")
+    print("3. RTMW-X ONNX (최고 성능)")
     
-    model_choice = input("모델 선택 (1-2, 기본값: 1): ").strip()
+    model_choice = input("모델 선택 (1-3, 기본값: 1): ").strip()
     
     rtmw_model_map = {
-        '1': 'rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx',
-        '2': 'rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx',
-        '': 'rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx'  # 기본값
+        '1': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx',
+        '2': 'rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx',
+        '3': 'rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx',
+        '': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx'  # 기본값을 새 모델로 변경
     }
     
-    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx')
+    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx')
     print(f"✅ 선택된 ONNX 모델: {rtmw_model_name}")
 
     # 디바이스 설정

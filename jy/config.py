@@ -62,9 +62,21 @@ RTMW_MODEL_OPTIONS = [
 # ONNX 모델 옵션들 (새로 추가)
 RTMW_ONNX_MODEL_OPTIONS = [
     {
+        "filename": "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx",
+        "path": os.path.join(MODELS_DIR, "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx"),
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip",
+        "type": "zip",
+        "extracted_name": "end2end.onnx",
+        "description": "RTMW-DW-X-L 384x288 ONNX (최신 고성능 모델 - ZIP)",
+        "input_size": (288, 384),  # ONNX 모델의 실제 입력 크기 (W, H)
+        "keypoints": 133,
+        "md5": None
+    },
+    {
         "filename": "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
         "path": os.path.join(MODELS_DIR, "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"),
         "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+        "type": "direct",
         "description": "RTMW-L 384x288 ONNX (최적화된 추론 성능)",
         "input_size": (288, 384),  # ONNX 모델의 실제 입력 크기 (W, H)
         "keypoints": 133,
@@ -74,6 +86,7 @@ RTMW_ONNX_MODEL_OPTIONS = [
         "filename": "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx", 
         "path": os.path.join(MODELS_DIR, "rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"),
         "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-x_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
+        "type": "direct",
         "description": "RTMW-X 384x288 ONNX (최고 성능)",
         "input_size": (288, 384),
         "keypoints": 133,

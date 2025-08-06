@@ -11,6 +11,8 @@ import numpy as np
 import time
 import urllib.request
 import hashlib
+import zipfile
+import tempfile
 from pathlib import Path
 from typing import List, Tuple, Optional
 from collections import deque
@@ -25,7 +27,14 @@ except ImportError:
 
 # 모델 다운로드 관련 상수
 MODEL_URLS = {
+    "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx": {
+        "type": "zip",
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip",
+        "extracted_name": "end2end.onnx",
+        "md5": None  # zip 파일의 MD5는 별도로 확인하지 않음
+    },
     "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx": {
+        "type": "direct",
         "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx",
         "md5": "6708b5b97b65d476b982a6e8b2fc56e1"
     }
@@ -72,6 +81,91 @@ def download_file_with_progress(url: str, filepath: str, expected_md5: str = Non
             os.remove(filepath)
         return False
 
+def download_and_extract_zip(url: str, target_filepath: str, extracted_name: str):
+    """ZIP 파일 다운로드 및 특정 파일 압축 해제"""
+    print(f"📦 ZIP 파일 다운로드 및 압축 해제 중...")
+    print(f"   URL: {url}")
+    print(f"   대상 파일: {extracted_name}")
+    
+    try:
+        # 임시 디렉토리 생성
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = os.path.join(temp_dir, "model.zip")
+            
+            # ZIP 파일 다운로드
+            def show_progress(block_num, block_size, total_size):
+                downloaded = block_num * block_size
+                if total_size > 0:
+                    percent = min(downloaded * 100.0 / total_size, 100.0)
+                    downloaded_mb = downloaded / (1024 * 1024)
+                    total_mb = total_size / (1024 * 1024)
+                    print(f"\r   다운로드 진행률: {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='')
+            
+            urllib.request.urlretrieve(url, zip_path, show_progress)
+            print()  # 새 줄
+            
+            # ZIP 파일 압축 해제
+            print("   📂 압축 해제 중...")
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                # ZIP 파일 내용 확인
+                file_list = zip_ref.namelist()
+                print(f"   ZIP 파일 내용: {len(file_list)}개 파일")
+                
+                # 대상 파일 찾기
+                target_file_in_zip = None
+                for file_path in file_list:
+                    if file_path.endswith(extracted_name) or os.path.basename(file_path) == extracted_name:
+                        target_file_in_zip = file_path
+                        break
+                
+                if target_file_in_zip is None:
+                    print(f"   ❌ ZIP 파일에서 '{extracted_name}' 파일을 찾을 수 없습니다.")
+                    print(f"   📋 사용 가능한 파일들:")
+                    for file_path in file_list[:10]:  # 처음 10개만 출력
+                        print(f"      - {file_path}")
+                    if len(file_list) > 10:
+                        print(f"      ... 총 {len(file_list)}개 파일")
+                    return False
+                
+                print(f"   ✅ 대상 파일 발견: {target_file_in_zip}")
+                
+                # 대상 디렉토리 생성
+                os.makedirs(os.path.dirname(target_filepath), exist_ok=True)
+                
+                # 파일 압축 해제
+                with zip_ref.open(target_file_in_zip) as source, open(target_filepath, 'wb') as target:
+                    file_size = zip_ref.getinfo(target_file_in_zip).file_size
+                    extracted_size = 0
+                    
+                    while True:
+                        chunk = source.read(8192)  # 8KB 청크
+                        if not chunk:
+                            break
+                        target.write(chunk)
+                        extracted_size += len(chunk)
+                        
+                        if file_size > 0:
+                            percent = extracted_size * 100.0 / file_size
+                            print(f"\r   압축 해제 진행률: {percent:.1f}%", end='')
+                
+                print()  # 새 줄
+                print(f"✅ 압축 해제 완료: {os.path.basename(target_filepath)}")
+                
+                # 파일 크기 확인
+                if os.path.exists(target_filepath):
+                    file_size_mb = os.path.getsize(target_filepath) / (1024 * 1024)
+                    print(f"   파일 크기: {file_size_mb:.1f} MB")
+                    return True
+                else:
+                    print(f"   ❌ 압축 해제된 파일을 찾을 수 없습니다.")
+                    return False
+    
+    except Exception as e:
+        print(f"\n❌ ZIP 다운로드/압축 해제 실패: {e}")
+        if os.path.exists(target_filepath):
+            os.remove(target_filepath)
+        return False
+
 def ensure_model_exists(model_path: str, model_name: str = None) -> bool:
     """모델 파일 존재 확인 및 자동 다운로드"""
     if os.path.exists(model_path):
@@ -86,14 +180,29 @@ def ensure_model_exists(model_path: str, model_name: str = None) -> bool:
         model_info = MODEL_URLS[model_name]
         print(f"🔍 모델 자동 다운로드 시작: {model_name}")
         
-        return download_file_with_progress(
-            model_info["url"], 
-            model_path, 
-            model_info.get("md5")
-        )
+        # 다운로드 타입에 따라 처리
+        if model_info.get("type") == "zip":
+            # ZIP 파일 다운로드 및 압축 해제
+            return download_and_extract_zip(
+                model_info["url"],
+                model_path,
+                model_info["extracted_name"]
+            )
+        else:
+            # 직접 파일 다운로드
+            return download_file_with_progress(
+                model_info["url"], 
+                model_path, 
+                model_info.get("md5")
+            )
     else:
         print(f"❌ 알 수 없는 모델: {model_name}")
         print(f"   수동으로 다운로드하여 다음 경로에 저장하세요: {model_path}")
+        
+        # 사용 가능한 모델 목록 출력
+        print(f"   📋 사용 가능한 모델들:")
+        for available_model in MODEL_URLS.keys():
+            print(f"      - {available_model}")
         return False
 
 def get_available_providers():
@@ -122,7 +231,7 @@ def select_best_provider():
     return 'CPUExecutionProvider'
 
 class YOLO11LRTMWONNXInferencer:
-    """YOLO11L + RTMW-L ONNX 하이브리드 추론기"""
+    """YOLO11L + RTMW ONNX 하이브리드 추론기 (ZIP 다운로드 지원)"""
     
     def __init__(self, 
                  rtmw_onnx_path: str,
@@ -131,7 +240,7 @@ class YOLO11LRTMWONNXInferencer:
                  optimize_for_accuracy: bool = True):
         """
         Args:
-            rtmw_onnx_path: RTMW-L ONNX 모델 경로
+            rtmw_onnx_path: RTMW ONNX 모델 경로 (ZIP 파일 자동 다운로드/압축해제 지원)
             detection_device: 검출 디바이스 ('auto', 'cpu', 'cuda', 'xpu')
             pose_device: 포즈 추정 디바이스 ('auto', 'cpu', 'cuda', 'openvino')
             optimize_for_accuracy: 정확도 최적화 여부
@@ -147,8 +256,13 @@ class YOLO11LRTMWONNXInferencer:
         self.detection_device = self._determine_detection_device(detection_device)
         self.pose_provider = self._determine_pose_provider(pose_device)
         
-        print(f"🚀 YOLO11L + RTMW-L ONNX 하이브리드 추론기 초기화:")
+        # 모델 이름 확인 (경로에서 추출)
+        model_filename = os.path.basename(rtmw_onnx_path)
+        model_type = "RTMW-DW-X-L" if "dw-x-l" in model_filename else "RTMW"
+        
+        print(f"🚀 YOLO11L + {model_type} ONNX 하이브리드 추론기 초기화:")
         print(f"   - YOLO 모델: YOLO11L (Large - 고정확도)")
+        print(f"   - RTMW 모델: {model_type} 384x288 ONNX (ZIP 다운로드 지원)")
         print(f"   - RTMW 모델: RTMW-L 384x288 ONNX")
         print(f"   - 검출 디바이스: {self.detection_device}")
         print(f"   - 포즈 Provider: {self.pose_provider}")
@@ -687,7 +801,8 @@ def main():
     """메인 테스트 함수"""
     # 모델 경로 설정 - 여러 가능한 경로 확인
     models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
-    rtmw_model_name = "rtmw-l_simcc-cocktail14_pt-ucoco_270e-384x288.onnx"
+    # 새 고성능 모델을 기본으로 사용
+    rtmw_model_name = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx"
     
     # 가능한 모델 경로들
     possible_paths = [
@@ -708,13 +823,13 @@ def main():
         rtmw_onnx_path = possible_paths[0]  # 첫 번째 경로 사용
     
     try:
-        print("🚀 YOLO11L + RTMW-L ONNX 하이브리드 추론기 테스트")
+        print("🚀 YOLO11L + RTMW-DW-X-L ONNX 하이브리드 추론기 테스트")
         print("=" * 70)
         
         # 사용 가능한 ONNX Provider 확인
         get_available_providers()
         
-        # YOLO11L + RTMW-L ONNX 하이브리드 추론기 생성
+        # YOLO11L + RTMW-DW-X-L ONNX 하이브리드 추론기 생성
         inferencer = YOLO11LRTMWONNXInferencer(
             rtmw_onnx_path=rtmw_onnx_path,
             detection_device="auto",
@@ -760,12 +875,13 @@ def main():
         if choice == 'y':
             inferencer.test_webcam()
         
-        print(f"\n🏆 YOLO11L + RTMW-L ONNX 시스템 특징:")
+        print(f"\n🏆 YOLO11L + RTMW ONNX 시스템 특징:")
         print(f"   🎯 최고 정확도: Large 모델로 더 정확한 사람 검출")
         print(f"   🔍 정밀 검출: 낮은 신뢰도 임계값으로 놓치기 쉬운 사람도 검출")
-        print(f"   📐 최적 입력: YOLO 832px, RTMW-L 384x288")
+        print(f"   📐 최적 입력: YOLO 832px, RTMW 384x288")
         print(f"   ⚡ ONNX 가속: OpenVINO/CUDA/DirectML 활용")
         print(f"   💨 빠른 추론: ONNX Runtime 최적화")
+        print(f"   📦 ZIP 지원: 자동 ZIP 다운로드 및 압축 해제")
         print(f"   📥 자동 다운로드: 필요한 모델 자동 설치")
         
     except Exception as e:

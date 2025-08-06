@@ -17,3 +17,23 @@ python -m pip install -e .
 cd jy
 # ONNX 추론기 실행 (또는 원하는 스크립트로 변경)
 python onnx_inferencer.py
+
+
+
+# cd .. && python3 -m venv .venv
+# . .venv/bin/activate
+# python3 -m pip install --upgrade pip setuptools wheel 
+# pip3 install uv 
+# uv pip install torchvision torchaudio torch --system
+# uv pip install opencv-python-headless h5py tqdm --system
+# uv pip install mmdet mmengine --system
+# uv pip install mmcv==2.1.0 --system
+# uv pip install ultralytics --system
+
+# uv pip3 install chumpy --no-build-isolation --system
+# uv pip3 install xtcocotools --no-build-isolation --system
+
+
+# python3 -m pip install -e .
+# cd jy
+# python stream_processor.py
