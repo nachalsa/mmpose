@@ -146,13 +146,35 @@ class OptimizedInferencer:
         """RTMW 모델 초기화"""
         try:
             from mmpose.apis import MMPoseInferencer
-            self.rtmw_inferencer = MMPoseInferencer(
-                model=config_path,
-                weights=model_path,
-                device=self.pose_device
-            )
+            # MMPose 버전별 호환성 처리
+            try:
+                # 최신 버전 (pose2d 파라미터 사용)
+                self.rtmw_inferencer = MMPoseInferencer(
+                    pose2d=config_path,
+                    pose2d_weights=model_path,
+                    device=self.pose_device
+                )
+            except TypeError:
+                try:
+                    # 이전 버전 (model 파라미터 사용)
+                    self.rtmw_inferencer = MMPoseInferencer(
+                        model=config_path,
+                        weights=model_path,
+                        device=self.pose_device
+                    )
+                except TypeError:
+                    # 가장 기본적인 초기화 방식
+                    self.rtmw_inferencer = MMPoseInferencer(
+                        config_path, 
+                        model_path, 
+                        device=self.pose_device
+                    )
         except ImportError:
             self.logger.error("❌ mmpose를 설치해주세요: pip install mmpose")
+            raise
+        except Exception as e:
+            self.logger.error(f"❌ RTMW 모델 초기화 실패: {e}")
+            self.logger.info("💡 MMPose 버전을 확인해주세요: pip show mmpose")
             raise
 
     def detect_persons_cpu(self, frames: List[np.ndarray]) -> List[List[List[float]]]:
@@ -455,8 +477,6 @@ class OptimizedVideoProcessor:
                     'scores': list(arrays['scores'].shape)
                 },
                 'keypoint_scale': self.keypoint_scale,
-                'yolo_device': self.inferencer.yolo_device,
-                'batch_size': self.batch_size,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
             
@@ -761,8 +781,6 @@ class OptimizedBatchProcessor:
                     'item_types': self.item_types,
                     'direction': self.direction,
                     'video_count': len(successful_keys),
-                    'yolo_device': self.yolo_device,
-                    'inference_batch_size': self.inference_batch_size,
                     'creation_time': str(datetime.now())
                 }
                 f_frames.attrs.update(batch_metadata)
