@@ -373,45 +373,61 @@ def gpu_inference_worker(
     task_queue: mp.Queue, 
     result_queue: mp.Queue, 
     rtmw_model_name: str, 
-    rtmw_config_path: str
+    rtmw_config_path: str,
+    gpu_batch_size: int = 8  # GPU 배치 크기 추가
 ):
-    """GPU에서 모델 추론만 전담하는 프로세스"""
-    print("🚀 GPU Inference Worker 시작...")
+    """GPU에서 배치 추론을 수행하는 프로세스"""
+    print(f"🚀 GPU Inference Worker 시작 (배치 크기: {gpu_batch_size})...")
+    
     # 이 프로세스 내에서 자체적으로 처리기 초기화
     processor = StreamlinedVideoProcessor(
         rtmw_model_name=rtmw_model_name,
         rtmw_config_path=rtmw_config_path
     )
     
+    batch_jobs = []
+    
     while True:
         try:
-            # 작업 큐에서 (작업 ID, 비디오 경로) 가져오기
-            job = task_queue.get(timeout=5)
-            if job is None: # 종료 신호
-                break
+            # 배치 크기만큼 작업 수집
+            for _ in range(gpu_batch_size):
+                try:
+                    job = task_queue.get_nowait()
+                    if job is None:  # 종료 신호
+                        # 남은 배치 처리
+                        if batch_jobs:
+                            process_batch(processor, batch_jobs, result_queue)
+                        return
+                    batch_jobs.append(job)
+                except queue.Empty:
+                    break
             
-            job_id, item_type, item_id, video_path = job
+            # 수집된 작업들을 배치로 처리
+            if batch_jobs:
+                process_batch(processor, batch_jobs, result_queue)
+                batch_jobs = []
             
-            # 비디오 처리 (YOLO + RTMW)
-            arrays = processor.process_video_to_arrays(video_path)
-            
-            if arrays:
-                # 결과 큐에 (작업 ID, 결과) 넣기
-                result_queue.put((job_id, item_type, item_id, video_path, arrays))
-            else:
-                # 실패한 경우에도 알려주어 처리가능하도록 함
-                result_queue.put((job_id, item_type, item_id, video_path, None))
+            if not batch_jobs:  # 더 이상 작업이 없으면 잠시 대기
+                time.sleep(0.1)
                 
-        except queue.Empty:
-            # 큐가 비어있으면 종료 준비
-            print("GPU Worker: 작업 큐가 비었습니다. 종료합니다.")
-            break
         except Exception as e:
-            # 에러 로그 (어떤 작업에서 에러났는지 식별 가능하게)
-            print(f"💥 GPU Worker 오류 발생: {e} - 작업: {job if 'job' in locals() else 'Unknown'}")
+            print(f"💥 GPU Worker 오류 발생: {e}")
             continue
             
     print("👋 GPU Inference Worker 종료.")
+
+def process_batch(processor, batch_jobs, result_queue):
+    """배치 작업 처리"""
+    for job in batch_jobs:
+        try:
+            job_id, item_type, item_id, video_path = job
+            arrays = processor.process_video_to_arrays(video_path)
+            result_queue.put((job_id, item_type, item_id, video_path, arrays))
+        except Exception as e:
+            print(f"💥 배치 처리 오류: {e}")
+            result_queue.put((job[0], job[1], job[2], job[3], None))
+
+
 
 # +++ 신규: CPU 후처리를 위한 워커 함수 +++
 def cpu_postprocess_worker(
@@ -472,7 +488,7 @@ def cpu_postprocess_worker(
             print(f"💥 CPU 후처리 오류: {e}")
 
 class BatchProcessor:
-    """폴더별 250개 단위 배치 처리기 (병렬 처리 구조로 변경)"""
+    """폴더별 250개 단위 배치 처리기 (GPU 최적화 병렬 처리)"""
     
     def __init__(self, 
                  data_root: str = "data/1.Training",
@@ -482,7 +498,8 @@ class BatchProcessor:
                  rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py", 
                  direction: str = "F",
                  item_types: List[str] = ["WORD"],
-                 num_cpu_workers: int = 4): # CPU 워커 수 추가
+                 num_cpu_workers: int = 4,
+                 gpu_batch_size: int = 8):  # GPU 배치 크기 추가
         
         self.data_root = Path(data_root).resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -491,10 +508,11 @@ class BatchProcessor:
         self.rtmw_config_path = rtmw_config_path
         self.direction = direction.upper()
         self.item_types = [t.upper() for t in item_types]
-        self.keypoint_scale = 8 # 후처리 워커에 전달할 값
+        self.keypoint_scale = 8
         
-        # CPU 코어 수 설정 (최대 사용 가능한 코어 수 이내로 제한)
+        # GPU 최적화 설정 추가
         self.num_cpu_workers = min(num_cpu_workers, os.cpu_count())
+        self.gpu_batch_size = gpu_batch_size
         
         # 유효성 검사
         if self.direction not in {'F', 'U', 'L', 'R', 'D'}:
@@ -513,9 +531,9 @@ class BatchProcessor:
         self.video_output_dir.mkdir(parents=True, exist_ok=True)
         self.hdf5_output_dir.mkdir(parents=True, exist_ok=True)
         
-        self.logger.info("✅ 배치 처리기(병렬) 초기화 완료")
+        self.logger.info("✅ GPU 최적화 배치 처리기 초기화 완료")
         self.logger.info(f"   - CPU 워커 수: {self.num_cpu_workers}")
-        self.logger.info(f"   - GPU 워커 수: 1 (고정)")
+        self.logger.info(f"   - GPU 배치 크기: {self.gpu_batch_size}")
 
     # ... (extract_item_info, collect_videos_by_folder, create_batches_by_folder 메서드는 변경 없음) ...
     def extract_item_info(self, video_path: Path) -> Optional[Tuple[str, int]]:
@@ -571,7 +589,7 @@ class BatchProcessor:
 
     # +++ 핵심 로직 변경: process_all_batches +++
     def process_all_batches(self, cleanup_intermediate: bool = False):
-        """전체 배치 처리 파이프라인 (병렬 처리)"""
+        """전체 배치 처리 파이프라인 (GPU 최적화 병렬 처리)"""
         folder_video_data = self.collect_videos_by_folder()
         if not folder_video_data:
             self.logger.error("❌ 처리할 영상이 없습니다")
@@ -590,14 +608,12 @@ class BatchProcessor:
         result_queue = mp.Queue()
         
         # 2. 작업 큐에 모든 비디오 추가
-        # job_id를 추가하여 나중에 결과를 매칭할 수 있도록 함
         for i, (item_type, item_id, video_path) in enumerate(all_videos):
             task_queue.put((i, item_type, item_id, video_path))
         
-        # 3. 워커 프로세스 생성 및 시작
-        # GPU 추론 프로세스 (1개)
+        # 3. GPU 추론 프로세스 생성 (GPU 배치 크기 적용)
         gpu_worker = mp.Process(target=gpu_inference_worker, args=(
-            task_queue, result_queue, self.rtmw_model_name, self.rtmw_config_path
+            task_queue, result_queue, self.rtmw_model_name, self.rtmw_config_path, self.gpu_batch_size
         ))
         gpu_worker.start()
 
@@ -607,16 +623,13 @@ class BatchProcessor:
         ))
 
         # 4. 진행률 표시 및 대기
-        successful_keys_map = {} # 배치별 성공 키 저장을 위한 맵
-        with tqdm(total=len(all_videos), desc="전체 비디오 처리") as pbar:
+        successful_keys_map = {}
+        with tqdm(total=len(all_videos), desc=f"GPU 병렬 처리 (배치:{self.gpu_batch_size})") as pbar:
             for _ in range(len(all_videos)):
-                # 결과가 나올 때까지 대기 (결과 큐에서 하나씩 꺼냄)
                 job_id, item_type, item_id, video_path, arrays = result_queue.get()
-                if arrays: # 성공한 경우
+                if arrays:
                     key = f"{item_type}{item_id:04d}"
-                    # 어느 배치에 속하는지 찾아서 저장
                     for batch_info in self.create_batches_by_folder(folder_video_data):
-                        # batch_info['data']는 (item_type, item_id, path) 튜플 리스트
                         if any(d[0] == item_type and d[1] == item_id for d in batch_info['data']):
                             if batch_info['batch_id'] not in successful_keys_map:
                                 successful_keys_map[batch_info['batch_id']] = []
@@ -624,10 +637,10 @@ class BatchProcessor:
                             break
                 pbar.update(1)
 
-        # 5. 모든 워커 종료 신호 보내기
-        task_queue.put(None) # GPU 워커에게 종료 신호
+        # 5. 모든 워커 종료
+        task_queue.put(None)
         for _ in range(self.num_cpu_workers):
-             result_queue.put(None) # 후처리 워커들에게 종료 신호
+             result_queue.put(None)
 
         gpu_worker.join()
         postprocess_pool.close()
@@ -784,14 +797,12 @@ class BatchProcessor:
             self.logger.info("✅ 테스트 배치 HDF5 생성 완료.")
         
 def main():
-    """메인 실행 함수 (병렬 처리 옵션 추가)"""
-    # 필수: multiprocessing 시작 방식을 'spawn'으로 설정 (특히 macOS, Windows, GPU 사용 시)
+    """메인 실행 함수 (GPU 최적화 병렬 처리)"""
     mp.set_start_method('spawn', force=True)
 
-    print("🚀 스트림라인 배치 처리기 (WORD + SEN 지원) - 병렬 처리 버전")
+    print("🚀 GPU 최적화 스트림라인 배치 처리기")
     print("=" * 60)
     
-    # ... (기존 사용자 입력 부분은 동일) ...
     print("\n처리할 아이템 타입을 선택하세요:")
     print("1. WORD만 처리\n2. SEN만 처리\n3. WORD + SEN 모두 처리 (기본값)")
     type_choice = input("타입 선택 (1-3, 기본값: 3): ").strip()
@@ -834,7 +845,7 @@ def main():
     direction = direction_map.get(direction_choice, 'F')
     print(f"✅ 선택된 방향: {direction}")
     
-    # +++ CPU 워커 수 입력 +++
+    # CPU 워커 수 입력
     default_cpu_workers = max(1, os.cpu_count() // 2)
     cpu_workers_input = input(f"\n사용할 CPU 워커 수를 입력하세요 (기본값: {default_cpu_workers}): ").strip()
     try:
@@ -842,20 +853,31 @@ def main():
     except ValueError:
         num_cpu_workers = default_cpu_workers
     print(f"✅ CPU 워커 수: {num_cpu_workers}")
+    
+    # GPU 배치 크기 입력 추가
+    default_gpu_batch = 8
+    gpu_batch_input = input(f"\nGPU 배치 크기를 입력하세요 (기본값: {default_gpu_batch}): ").strip()
+    try:
+        gpu_batch_size = int(gpu_batch_input) if gpu_batch_input else default_gpu_batch
+    except ValueError:
+        gpu_batch_size = default_gpu_batch
+    print(f"✅ GPU 배치 크기: {gpu_batch_size}")
 
-    # 배치 처리기 초기화 (모델 다운로드는 최초 실행 시 필요)
-    print("\n📥 모델 확인 및 초기화 중...")
+    # 배치 처리기 초기화
+    print("\n📥 GPU 최적화 모델 초기화 중...")
     try:
         batch_processor = BatchProcessor(
             rtmw_model_name=rtmw_model_name, 
             direction=direction,
             item_types=item_types,
-            num_cpu_workers=num_cpu_workers
+            num_cpu_workers=num_cpu_workers,
+            gpu_batch_size=gpu_batch_size  # GPU 배치 크기 추가
         )
-        print("✅ 초기화 완료!")
+        print("✅ GPU 최적화 초기화 완료!")
     except Exception as e:
         print(f"❌ 초기화 실패: {e}")
         return
+    
     choice = '3'
 
     while True:
