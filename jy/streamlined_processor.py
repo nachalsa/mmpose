@@ -10,7 +10,7 @@ import json
 import h5py
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import logging
 from tqdm import tqdm
 import time
@@ -18,6 +18,7 @@ import shutil
 import urllib.request
 from datetime import datetime
 import re
+# import gc # 가비지 컬렉터 임포트
 
 # 설정 및 MMPose 관련 임포트
 from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
@@ -143,8 +144,8 @@ class StreamlinedVideoProcessor:
             temp_model = YOLO(yolo_config["filename"])
             
             # ultralytics 캐시에서 모델 파일 찾기
-            import torch
-            from ultralytics.utils import ASSETS
+            # import torch # 필요 없어 보임
+            # from ultralytics.utils import ASSETS # 필요 없어 보임
             
             # 다운로드된 모델 찾기
             cache_dir = Path.home() / '.cache' / 'ultralytics'
@@ -273,36 +274,39 @@ class StreamlinedVideoProcessor:
             self.logger.warning(f"⚠️ RTMW 전처리 실패: {e}")
             return None
 
-    def process_video_to_arrays(self, video_path: str) -> Optional[Dict[str, np.ndarray]]:
+    # --- 수정 시작: process_video_to_arrays ---
+    def process_video_to_arrays(self, video_path: str) -> Optional[Dict[str, Union[List[np.ndarray], np.ndarray, int]]]:
         """
-        비디오를 넘파이 배열로 직접 변환
+        비디오를 처리하여 포즈 정보와 'JPEG 인코딩된 프레임'을 반환
+        crop_images 대신 JPEG 바이트 스트림을 리스트로 반환하여 메모리 효율성 증대
         
         Args:
             video_path: 비디오 파일 경로
             
         Returns:
             Dict containing:
-            - crop_images: (N, 288, 384, 3) uint8
+            - jpeg_frames: List[np.ndarray] (각 요소는 JPEG 바이트 스트림)
             - keypoints: (N, 133, 2) float32  
             - scores: (N, 133) float32
             - frame_count: int
         """
         cap = cv2.VideoCapture(video_path)
-
         if not cap.isOpened():
             self.logger.error(f"❌ 비디오 열기 실패: {video_path}")
             return None
-            
+        
+        # cap.release()가 항상 호출되도록 try-finally
         try:
-            all_crop_images, all_keypoints, all_scores = [], [], []
+            # 원본 이미지 배열 대신 JPEG 인코딩된 바이트 스트림을 저장
+            all_jpeg_frames, all_keypoints, all_scores = [], [], []
             frame_idx = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
                 
-                # 1. YOLO 검출로 사람 찾기
                 try:
+                    # 1. YOLO 검출로 사람 찾기
                     vis_image, results = self.inferencer.process_frame(frame)
                     if not results or len(results) == 0:
                         frame_idx += 1
@@ -320,8 +324,15 @@ class StreamlinedVideoProcessor:
                     # 3. 크롭된 이미지에서 직접 포즈 추정 (288x384 좌표계)
                     keypoints, scores = self.inferencer.estimate_pose_on_crop(crop_image)
                     
-                    # 4. 배열에 추가
-                    all_crop_images.append(crop_image)
+                    # 4. 크롭된 이미지를 JPEG 바이트 스트림으로 인코딩하여 리스트에 추가
+                    # 메모리에 원본 이미지를 계속 들고 있지 않도록 함
+                    ret_jpg, encoded_jpg = cv2.imencode('.jpg', crop_image, [cv2.IMWRITE_JPEG_QUALITY, 90]) # 90% 품질
+                    if not ret_jpg:
+                        self.logger.warning(f"프레임 {frame_idx} JPEG 인코딩 실패: {video_path}")
+                        frame_idx += 1
+                        continue
+
+                    all_jpeg_frames.append(encoded_jpg)
                     all_keypoints.append(keypoints)
                     all_scores.append(scores)
                     
@@ -332,29 +343,29 @@ class StreamlinedVideoProcessor:
                 
                 frame_idx += 1
             
-            
-            
-            if not all_crop_images:
+            if not all_jpeg_frames:
                 self.logger.warning(f"⚠️ 유효한 프레임이 없습니다: {video_path}")
                 return None
             
             return {
-                'crop_images': np.stack(all_crop_images),      # (N, 288, 384, 3)
-                'keypoints': np.stack(all_keypoints),          # (N, 133, 2)
-                'scores': np.stack(all_scores),                # (N, 133)
-                'frame_count': len(all_crop_images)
+                'jpeg_frames': all_jpeg_frames,         # (List[np.ndarray] - 각 요소는 JPEG 바이트 스트림)
+                'keypoints': np.stack(all_keypoints),   # (N, 133, 2)
+                'scores': np.stack(all_scores),         # (N, 133)
+                'frame_count': len(all_jpeg_frames)
             }
             
         except Exception as e:
             self.logger.error(f"❌ 비디오 처리 실패: {video_path}, 오류: {e}")
             return None
         finally:
+            # 어떤 경우에도 비디오 캡처 객체를 해제
             if cap:
                 cap.release()
 
-    def process_video(self, item_type: str, item_id: int, video_path: str, output_dir: Path) -> Tuple[bool, Optional[np.ndarray]]:
+    def process_video(self, item_type: str, item_id: int, video_path: str, output_dir: Path) -> bool:
         """
         WORD/SEN ID 기반으로 비디오 처리하고 저장
+        crop_images를 직접 반환하지 않고, JPEG으로 인코딩하여 파일로 저장
         
         Args:
             item_type: "WORD" 또는 "SEN"
@@ -364,23 +375,25 @@ class StreamlinedVideoProcessor:
             
         Returns:
             bool: 성공 여부
-            Optional[np.ndarray]: crop_images 배열
         """
         try:
-            # 비디오 처리
             self.logger.info(f"🎬 처리 중: {item_type}{item_id:04d} - {Path(video_path).name}")
             start_time = time.time()
             
             arrays = self.process_video_to_arrays(video_path)
             if arrays is None:
-                return False, None
+                return False
             
             processing_time = time.time() - start_time
             
-            # WORD/SEN ID 폴더 생성
             item_dir = output_dir / f"{item_type}{item_id:04d}"
             item_dir.mkdir(parents=True, exist_ok=True)
             
+            # +++ 변경된 부분: JPEG 바이트 스트림을 .npz 파일로 저장 +++
+            # 각 프레임의 JPEG 데이터를 dictionary 형태로 구성하여 npz 파일에 압축 저장
+            jpeg_frames_dict = {f'frame_{i}': frame for i, frame in enumerate(arrays['jpeg_frames'])}
+            np.savez_compressed(item_dir / "crop_images_jpeg.npz", **jpeg_frames_dict)
+
             # 키포인트 8배 스케일링하여 정수로 저장
             keypoints_scaled = np.round(arrays['keypoints'] * self.keypoint_scale).astype(np.int32)
             np.save(item_dir / "keypoints_scaled.npy", keypoints_scaled)
@@ -394,7 +407,8 @@ class StreamlinedVideoProcessor:
                 'frame_count': arrays['frame_count'],
                 'processing_time': processing_time,
                 'shape_info': {
-                    'crop_images': list(arrays['crop_images'].shape),
+                    # crop_images의 shape은 이제 가변 길이 JPEG이므로 frame_count만 기록
+                    'frame_count': arrays['frame_count'],
                     'keypoints_scaled': list(keypoints_scaled.shape),
                     'scores': list(arrays['scores'].shape)
                 },
@@ -406,12 +420,12 @@ class StreamlinedVideoProcessor:
                 json.dump(metadata, f, indent=2)
             
             self.logger.info(f"✅ {item_type}{item_id:04d} 완료: {arrays['frame_count']}프레임, {processing_time:.2f}초")
-            # crop_images를 반환하여 HDF5 생성 시 사용
-            return True, arrays['crop_images']
+            # crop_images를 반환하지 않고 성공 여부만 반환
+            return True
 
         except Exception as e:
             self.logger.error(f"❌ {item_type}{item_id:04d} 처리 실패: {e}")
-            return False, None
+            return False
 
 
 class BatchProcessor:
@@ -583,33 +597,34 @@ class BatchProcessor:
         self.logger.info(f"📦 전체 {len(all_batches)}개 배치 생성 완료")
         return all_batches
     
-    def process_batch(self, batch_info: Dict) -> Dict[str, np.ndarray]:
-        """배치 처리 (비디오 → 넘파이 배열) 및 crop_images 반환"""
+    def process_batch(self, batch_info: Dict) -> List[str]:
+        """
+        배치 처리 (비디오 → 넘파이 배열) 및 성공한 아이템의 키(예: "WORD0001") 목록 반환
+        crop_images는 이제 파일로 저장되므로 메모리에 들고 있지 않음
+        """
         batch_id = batch_info['batch_id']
         folder_name = batch_info['folder_name']
         batch_data = batch_info['data']
         
-        successful_data = {}
+        successful_keys = [] # 성공한 아이템의 키(폴더명) 목록만 저장
         
         self.logger.info(f"🔄 배치 {batch_id} [{folder_name}] 처리 시작 ({len(batch_data)}개)")
         
         for item_type, item_id, video_path in tqdm(batch_data, desc=f"배치 {batch_id} [{folder_name}]"):
-            success, crop_images = self.processor.process_video(item_type, item_id, video_path, self.video_output_dir)
+            # process_video는 이제 성공 여부(bool)만 반환
+            success = self.processor.process_video(item_type, item_id, video_path, self.video_output_dir)
             if success:
                 key = f"{item_type}{item_id:04d}"
-                successful_data[key] = {
-                    'crop_images': crop_images,
-                    'item_type': item_type,
-                    'item_id': item_id
-                }
+                successful_keys.append(key)
         
-        self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] 처리 완료: {len(successful_data)}/{len(batch_data)}개 성공")
-        return successful_data
+        self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] 처리 완료: {len(successful_keys)}/{len(batch_data)}개 성공")
+        return successful_keys
 
-    def create_hdf5_batch(self, successful_data: Dict[str, Dict], batch_info: Dict):
+
+    def create_hdf5_batch(self, successful_keys: List[str], batch_info: Dict):
         """
-        배열들을 프레임과 포즈로 분리된 HDF5 배치 파일로 변환합니다.
-        - 프레임: JPEG 형식으로 압축되어 저장 (가변 길이)
+        배열들을 프레임(JPEG)과 포즈로 분리된 HDF5 배치 파일로 변환합니다.
+        - 프레임: JPEG 형식으로 압축된 바이트 스트림을 파일에서 로드하여 저장
         - HDF5 데이터셋: LZF 압축 적용
         """
         try:
@@ -625,7 +640,7 @@ class BatchProcessor:
             frames_h5_path = self.hdf5_output_dir / f"batch_{types_str}_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
             poses_h5_path = self.hdf5_output_dir / f"batch_{types_str}_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
             
-            # JPEG 인코딩된 데이터를 위한 가변 길이 타입 정의
+            # JPEG 인코딩된 데이터를 위한 가변 길이 타입 정의 (cv2.imencode 결과는 np.uint8 배열)
             jpeg_vlen_dtype = h5py.vlen_dtype(np.uint8)
 
             # 2. 두 개의 파일을 동시에 열기 위한 with 구문 사용
@@ -639,23 +654,38 @@ class BatchProcessor:
                     'item_range': item_range,
                     'item_types': self.item_types,
                     'direction': self.direction,
-                    'video_count': len(successful_data),
+                    'video_count': len(successful_keys), # successful_data.keys() -> successful_keys
                     'creation_time': str(datetime.now())
                 }
                 f_frames.attrs.update(batch_metadata)
                 f_poses.attrs.update(batch_metadata)
                 
                 # 처리 성공한 키 목록을 정렬하여 순서 보장
-                keys = sorted(successful_data.keys())
+                keys_to_process = sorted(successful_keys) # successful_data.keys() -> successful_keys
 
-                for key in tqdm(keys, desc=f"HDF5 배치 {batch_id} [{folder_name}]"):
-                    data = successful_data[key]
-                    item_type = data['item_type']
-                    item_id = data['item_id']
-                    crop_images = data['crop_images']
+                for key in tqdm(keys_to_process, desc=f"HDF5 배치 {batch_id} [{folder_name}]"):
+                    # key에서 item_type과 item_id 추출 (예: "WORD0001")
+                    match = re.match(r"([A-Z]+)(\d+)", key)
+                    if not match:
+                        self.logger.warning(f"⚠️ HDF5 생성 중 유효하지 않은 키 형식: {key}. 건너뜁니다.")
+                        continue
+                    item_type = match.group(1)
+                    item_id = int(match.group(2))
                     
-                    # 저장된 데이터 로드
-                    item_dir = self.video_output_dir / f"{item_type}{item_id:04d}"
+                    # 저장된 데이터가 있는 디렉토리
+                    item_dir = self.video_output_dir / key
+                    
+                    # +++ 변경된 부분: JPEG .npz 파일 로드 +++
+                    try:
+                        with np.load(item_dir / "crop_images_jpeg.npz") as npz_file:
+                            # npz 파일에 저장된 모든 프레임을 파일명 순서대로 로드 (frame_0, frame_1, ...)
+                            frame_keys_in_npz = sorted(npz_file.files, key=lambda k: int(k.split('_')[1]))
+                            jpeg_frames = [npz_file[k] for k in frame_keys_in_npz]
+                    except FileNotFoundError:
+                        self.logger.warning(f"⚠️ {key}의 crop_images_jpeg.npz 파일을 찾을 수 없어 HDF5 생성에서 건너뜁니다.")
+                        continue
+                    
+                    # 저장된 키포인트와 스코어 로드
                     keypoints_scaled = np.load(item_dir / "keypoints_scaled.npy")
                     scores = np.load(item_dir / "scores.npy")
                     
@@ -667,14 +697,11 @@ class BatchProcessor:
                     # --- 프레임 파일(f_frames)에 데이터 저장 ---
                     frame_group = f_frames.create_group(video_group)
                     
-                    # 이미지를 JPEG 바이트 스트림으로 인코딩
-                    jpeg_frames = [cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1] for img in crop_images]
-                    
-                    # JPEG 데이터셋 생성 (가변 길이, lzf 압축)
+                    # 이미 JPEG 바이트 스트림이므로 추가 인코딩 필요 없음
+                    # JPEG 데이터셋 생성 (가변 길이, jpeg는 압축이미지이므로 압축하지 않음)
                     frame_group.create_dataset("frames_jpeg", 
                                              data=jpeg_frames, 
-                                             dtype=jpeg_vlen_dtype, 
-                                             compression='lzf')
+                                             dtype=jpeg_vlen_dtype)
                     
                     # 메타데이터 저장
                     f_frames.create_dataset(f"{video_group}/metadata", 
@@ -715,13 +742,20 @@ class BatchProcessor:
         for batch_info in all_batches:
             self.logger.info(f"\n🚀 배치 {batch_info['batch_id'] + 1}/{len(all_batches)} [{batch_info['folder_name']}] 처리 시작")
             
-            successful_data = self.process_batch(batch_info)
+            # process_batch는 이제 성공한 키 목록(List[str])을 반환
+            successful_keys = self.process_batch(batch_info)
             
-            if successful_data:
-                self.create_hdf5_batch(successful_data, batch_info)
+            if successful_keys:
+                # create_hdf5_batch에 성공한 키 목록을 전달
+                self.create_hdf5_batch(successful_keys, batch_info)
                 if cleanup_intermediate:
-                    self.cleanup_video_files(list(successful_data.keys()), batch_info)
+                    # cleanup_video_files에 성공한 키 목록을 전달
+                    self.cleanup_video_files(successful_keys, batch_info)
             
+            ## 여전히 문제가 생긴다면 활성화
+            # del successful_keys 
+            # gc.collect() 
+
             self.logger.info(f"✅ 배치 {batch_info['batch_id'] + 1} [{batch_info['folder_name']}] 완료\n")
         
         self.logger.info("🎉 전체 폴더별 배치 처리 완료!")
@@ -754,7 +788,7 @@ class BatchProcessor:
         for folder_name, stats in folder_stats.items():
             batches = stats['batches']
             videos = stats['videos']
-            types = ", ".join(sorted(stats['types']))
+            types = ", ".join(sorted(list(stats['types']))) # set을 list로 변환하여 정렬
             self.logger.info(f"📁 {folder_name}: {batches}개 배치, {videos}개 영상 ({types})")
             total_batches += batches
             total_videos += videos
@@ -779,7 +813,7 @@ class BatchProcessor:
         video_data = folder_video_data[test_folder][:test_count]
         
         types_in_test = set([item_type for item_type, _, _ in video_data])
-        types_str = ", ".join(sorted(types_in_test))
+        types_str = ", ".join(sorted(list(types_in_test))) # set을 list로 변환하여 정렬
         
         self.logger.info(f"🧪 테스트 배치 처리 시작 [{test_folder}] ({len(video_data)}개 {self.direction} 방향 영상, {types_str})")
         
@@ -792,12 +826,16 @@ class BatchProcessor:
             'item_range': f"{video_data[0][0]}{video_data[0][1]:04d}~{video_data[-1][0]}{video_data[-1][1]:04d}"
         }
         
-        successful_data = self.process_batch(batch_info)
+        # 테스트 배치 처리
+        successful_keys = self.process_batch(batch_info)
         
-        if successful_data:
-            self.create_hdf5_batch(successful_data, batch_info)
+        if successful_keys:
+            self.create_hdf5_batch(successful_keys, batch_info)
             self.logger.info("✅ 테스트 배치 HDF5 생성 완료. 중간 파일을 확인하려면 cleanup_intermediate=False로 실행하세요.")
-
+        
+        # 테스트 후에도 메모리 정리를 위해 gc.collect() 호출
+        del successful_keys
+        gc.collect()
 
 def main():
     """메인 실행 함수"""
