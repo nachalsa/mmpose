@@ -287,12 +287,13 @@ class StreamlinedVideoProcessor:
             - scores: (N, 133) float32
             - frame_count: int
         """
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                self.logger.error(f"❌ 비디오 열기 실패: {video_path}")
-                return None
+        cap = cv2.VideoCapture(video_path)
+
+        if not cap.isOpened():
+            self.logger.error(f"❌ 비디오 열기 실패: {video_path}")
+            return None
             
+        try:
             all_crop_images, all_keypoints, all_scores = [], [], []
             frame_idx = 0
             while True:
@@ -331,7 +332,7 @@ class StreamlinedVideoProcessor:
                 
                 frame_idx += 1
             
-            cap.release()
+            
             
             if not all_crop_images:
                 self.logger.warning(f"⚠️ 유효한 프레임이 없습니다: {video_path}")
@@ -347,6 +348,9 @@ class StreamlinedVideoProcessor:
         except Exception as e:
             self.logger.error(f"❌ 비디오 처리 실패: {video_path}, 오류: {e}")
             return None
+        finally:
+            if cap:
+                cap.release()
 
     def process_video(self, item_type: str, item_id: int, video_path: str, output_dir: Path) -> Tuple[bool, Optional[np.ndarray]]:
         """
