@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-스트림라인 비디오 처리기 - HDF5 배치 처리용
-WORD ID 기반으로 깔끔하게 처리하여 불필요한 중간 파일 제거
+스트림라인 비디오 처리기 - HDF5 배치 처리용 (WORD + SEN 지원)
+WORD ID와 SEN ID 기반으로 깔끔하게 처리하여 불필요한 중간 파일 제거
 """
 
 import os
@@ -17,6 +17,7 @@ import time
 import shutil
 import urllib.request
 from datetime import datetime
+import re
 
 # 설정 및 MMPose 관련 임포트
 from config import MODELS_DIR, YOLO_MODEL_CONFIG, RTMW_MODEL_OPTIONS
@@ -87,7 +88,7 @@ def fix_aspect_ratio(bbox_scale: np.ndarray, aspect_ratio: float) -> np.ndarray:
     return bbox_scale
 
 class StreamlinedVideoProcessor:
-    """HDF5용 간소화된 비디오 처리기"""
+    """HDF5용 간소화된 비디오 처리기 (WORD + SEN 지원)"""
     
     def __init__(self, 
                  rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
@@ -347,21 +348,23 @@ class StreamlinedVideoProcessor:
             self.logger.error(f"❌ 비디오 처리 실패: {video_path}, 오류: {e}")
             return None
 
-    def process_word_video(self, word_id: int, video_path: str, output_dir: Path) -> Tuple[bool, Optional[np.ndarray]]:
+    def process_video(self, item_type: str, item_id: int, video_path: str, output_dir: Path) -> Tuple[bool, Optional[np.ndarray]]:
         """
-        WORD ID 기반으로 비디오 처리하고 저장
+        WORD/SEN ID 기반으로 비디오 처리하고 저장
         
         Args:
-            word_id: WORD 번호 (예: 1)
+            item_type: "WORD" 또는 "SEN"
+            item_id: WORD/SEN 번호 (예: 1)
             video_path: 비디오 파일 경로
             output_dir: 출력 디렉토리
             
         Returns:
             bool: 성공 여부
+            Optional[np.ndarray]: crop_images 배열
         """
         try:
             # 비디오 처리
-            self.logger.info(f"🎬 처리 중: WORD{word_id:04d} - {Path(video_path).name}")
+            self.logger.info(f"🎬 처리 중: {item_type}{item_id:04d} - {Path(video_path).name}")
             start_time = time.time()
             
             arrays = self.process_video_to_arrays(video_path)
@@ -370,23 +373,18 @@ class StreamlinedVideoProcessor:
             
             processing_time = time.time() - start_time
             
-            # WORD ID 폴더 생성
-            word_dir = output_dir / f"WORD{word_id:04d}"
-            word_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 넘파이 배열 저장 (키포인트는 8배 스케일링)
-            # crop_images는 바로 사용 후 삭제될 것이므로 저장하지 않음
+            # WORD/SEN ID 폴더 생성
+            item_dir = output_dir / f"{item_type}{item_id:04d}"
+            item_dir.mkdir(parents=True, exist_ok=True)
             
             # 키포인트 8배 스케일링하여 정수로 저장
             keypoints_scaled = np.round(arrays['keypoints'] * self.keypoint_scale).astype(np.int32)
-            np.save(word_dir / "keypoints_scaled.npy", keypoints_scaled)
-            np.save(word_dir / "scores.npy", arrays['scores'])
-            
-            # JPEG 저장을 위해 crop_images는 메모리에 유지
-            # 임시 파일 대신 딕셔너리로 반환하여 create_hdf5_batch에 전달
+            np.save(item_dir / "keypoints_scaled.npy", keypoints_scaled)
+            np.save(item_dir / "scores.npy", arrays['scores'])
             
             metadata = {
-                'word_id': word_id,
+                'item_type': item_type,
+                'item_id': item_id,
                 'video_path': str(video_path),
                 'video_filename': Path(video_path).name,
                 'frame_count': arrays['frame_count'],
@@ -400,38 +398,46 @@ class StreamlinedVideoProcessor:
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            with open(word_dir / "metadata.json", 'w') as f:
+            with open(item_dir / "metadata.json", 'w') as f:
                 json.dump(metadata, f, indent=2)
             
-            self.logger.info(f"✅ WORD{word_id:04d} 완료: {arrays['frame_count']}프레임, {processing_time:.2f}초")
+            self.logger.info(f"✅ {item_type}{item_id:04d} 완료: {arrays['frame_count']}프레임, {processing_time:.2f}초")
             # crop_images를 반환하여 HDF5 생성 시 사용
             return True, arrays['crop_images']
 
         except Exception as e:
-            self.logger.error(f"❌ WORD{word_id:04d} 처리 실패: {e}")
+            self.logger.error(f"❌ {item_type}{item_id:04d} 처리 실패: {e}")
             return False, None
 
 
 class BatchProcessor:
-    """폴더별 250개 단위 배치 처리기"""
+    """폴더별 250개 단위 배치 처리기 (WORD + SEN 지원)"""
     
     def __init__(self, 
                  data_root: str = "data/1.Training",
                  output_dir: str = "sign_language_dataset",
                  batch_size: int = 250,
                  rtmw_model_name: str = "rtmw-x",
-                 direction: str = "F"):
+                 direction: str = "F",
+                 item_types: List[str] = ["WORD"]):  # 처리할 아이템 타입 목록
         
         self.data_root = Path(data_root)
         self.output_dir = Path(output_dir)
         self.batch_size = batch_size
         self.rtmw_model_name = rtmw_model_name
         self.direction = direction.upper()  # F, U, L, R, D 방향
+        self.item_types = [t.upper() for t in item_types]  # WORD, SEN 등
         
         # 방향 유효성 검사
         valid_directions = {'F', 'U', 'L', 'R', 'D'}
         if self.direction not in valid_directions:
             raise ValueError(f"Invalid direction: {direction}. Must be one of {valid_directions}")
+        
+        # 아이템 타입 유효성 검사
+        valid_item_types = {'WORD', 'SEN'}
+        invalid_types = set(self.item_types) - valid_item_types
+        if invalid_types:
+            raise ValueError(f"Invalid item types: {invalid_types}. Must be one of {valid_item_types}")
         
         # 로깅 설정
         logging.basicConfig(
@@ -445,19 +451,52 @@ class BatchProcessor:
         self.logger = logging.getLogger(__name__)
         
         # 출력 디렉토리 생성
-        self.word_output_dir = self.output_dir / "word_processing"
+        self.video_output_dir = self.output_dir / "video_processing"
         self.hdf5_output_dir = self.output_dir / "hdf5_batches"
         
-        self.word_output_dir.mkdir(parents=True, exist_ok=True)
+        self.video_output_dir.mkdir(parents=True, exist_ok=True)
         self.hdf5_output_dir.mkdir(parents=True, exist_ok=True)
         
         # 스트림라인 처리기 초기화
-        self.logger.info(f"🚀 모델 초기화 시작 (RTMW: {rtmw_model_name}, 방향: {self.direction})")
+        self.logger.info(f"🚀 모델 초기화 시작 (RTMW: {rtmw_model_name}, 방향: {self.direction}, 타입: {', '.join(self.item_types)})")
         self.processor = StreamlinedVideoProcessor(rtmw_model_name=rtmw_model_name)
         self.logger.info("✅ 배치 처리기 초기화 완료")
 
-    def collect_videos_by_folder(self) -> Dict[str, List[Tuple[int, str]]]:
-        """폴더별로 지정된 방향 영상 수집"""
+    def extract_item_info(self, video_path: Path) -> Optional[Tuple[str, int]]:
+        """
+        비디오 파일명에서 아이템 정보 추출 (WORD 또는 SEN)
+        
+        Args:
+            video_path: 비디오 파일 경로
+            
+        Returns:
+            Optional[Tuple[str, int]]: (item_type, item_id) 또는 None
+        """
+        filename = video_path.stem
+        
+        # 패턴 매칭: NIA_SL_WORD0001_REAL05_F.mp4 또는 NIA_SL_SEN0001_REAL09_F.mp4
+        for item_type in self.item_types:
+            # 정규식 패턴: item_type 뒤에 4자리 숫자
+            pattern = rf'_{item_type}(\d{{4}})_'
+            match = re.search(pattern, filename)
+            if match:
+                item_id = int(match.group(1))
+                return item_type, item_id
+        
+        # 레거시 패턴도 지원: _WORD 또는 _SEN 뒤에 숫자
+        for item_type in self.item_types:
+            if f'_{item_type}' in filename:
+                try:
+                    parts = filename.split(f'_{item_type}')[1].split('_')[0]
+                    item_id = int(parts)
+                    return item_type, item_id
+                except (IndexError, ValueError):
+                    continue
+        
+        return None
+
+    def collect_videos_by_folder(self) -> Dict[str, List[Tuple[str, int, str]]]:
+        """폴더별로 지정된 방향과 타입의 영상 수집"""
         videos_base_dir = self.data_root / "videos"
         folder_video_data = {}
         
@@ -473,44 +512,51 @@ class BatchProcessor:
             folder_name = sub_dir.name
             video_data = []
             
-            self.logger.info(f"🔍 폴더 검색 중: {folder_name} ({self.direction} 방향)")
+            self.logger.info(f"🔍 폴더 검색 중: {folder_name} ({self.direction} 방향, {', '.join(self.item_types)} 타입)")
             
             # 지정된 방향 영상 파일 검색
             pattern = f"*_{self.direction}.mp4"
             for video_file in sub_dir.glob(pattern):
                 try:
-                    # WORD 번호 추출
-                    filename = video_file.stem
-                    if '_WORD' not in filename:
-                        self.logger.warning(f"⚠️ WORD 번호를 찾을 수 없음: {filename}")
+                    # 아이템 정보 추출
+                    item_info = self.extract_item_info(video_file)
+                    if item_info is None:
+                        self.logger.debug(f"⚠️ 아이템 정보를 찾을 수 없음: {video_file.name}")
                         continue
-                        
-                    word_match = filename.split('_WORD')[1].split('_')[0]
-                    word_id = int(word_match)
                     
-                    video_data.append((word_id, str(video_file)))
-                    self.logger.debug(f"✅ 발견: {folder_name}/WORD{word_id:04d} - {video_file.name}")
+                    item_type, item_id = item_info
+                    video_data.append((item_type, item_id, str(video_file)))
+                    self.logger.debug(f"✅ 발견: {folder_name}/{item_type}{item_id:04d} - {video_file.name}")
                     
-                except (IndexError, ValueError) as e:
-                    self.logger.warning(f"⚠️ WORD ID 추출 실패: {filename} - {e}")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ 파일 처리 실패: {video_file.name} - {e}")
                     continue
             
             if video_data:
-                # 폴더 내에서 WORD ID로 정렬
-                video_data.sort(key=lambda x: x[0])
+                # 폴더 내에서 타입별, ID별로 정렬
+                video_data.sort(key=lambda x: (x[0], x[1]))
                 folder_video_data[folder_name] = video_data
                 
-                min_word = min(video_data, key=lambda x: x[0])[0]
-                max_word = max(video_data, key=lambda x: x[0])[0]
-                self.logger.info(f"📊 {folder_name}: {len(video_data)}개 영상, WORD{min_word:04d}~WORD{max_word:04d}")
+                # 통계 정보
+                type_counts = {}
+                for item_type, item_id, _ in video_data:
+                    type_counts[item_type] = type_counts.get(item_type, 0) + 1
+                
+                type_stats = ", ".join([f"{t}:{c}개" for t, c in type_counts.items()])
+                self.logger.info(f"📊 {folder_name}: 총 {len(video_data)}개 영상 ({type_stats})")
         
         total_videos = sum(len(videos) for videos in folder_video_data.values())
-        self.logger.info(f"🎬 총 {len(folder_video_data)}개 폴더에서 {total_videos}개 {self.direction} 방향 영상 발견")
+        total_type_counts = {}
+        for videos in folder_video_data.values():
+            for item_type, _, _ in videos:
+                total_type_counts[item_type] = total_type_counts.get(item_type, 0) + 1
+        
+        total_type_stats = ", ".join([f"{t}:{c}개" for t, c in total_type_counts.items()])
+        self.logger.info(f"🎬 총 {len(folder_video_data)}개 폴더에서 {total_videos}개 {self.direction} 방향 영상 발견 ({total_type_stats})")
         
         return folder_video_data
 
-
-    def create_batches_by_folder(self, folder_video_data: Dict[str, List[Tuple[int, str]]]) -> List[Dict]:
+    def create_batches_by_folder(self, folder_video_data: Dict[str, List[Tuple[str, int, str]]]) -> List[Dict]:
         """폴더별로 배치 생성"""
         all_batches = []
         batch_counter = 0
@@ -518,18 +564,19 @@ class BatchProcessor:
             for i in range(0, len(video_data), self.batch_size):
                 batch_data = video_data[i:i + self.batch_size]
                 batch_info = {
-                    'batch_id': batch_counter, 'folder_name': folder_name,
+                    'batch_id': batch_counter, 
+                    'folder_name': folder_name,
                     'folder_batch_idx': i // self.batch_size,
                     'data': batch_data,
-                    'word_range': (batch_data[0][0], batch_data[-1][0])
+                    'item_range': f"{batch_data[0][0]}{batch_data[0][1]:04d}~{batch_data[-1][0]}{batch_data[-1][1]:04d}"
                 }
                 all_batches.append(batch_info)
                 batch_counter += 1
         self.logger.info(f"📦 전체 {len(all_batches)}개 배치 생성 완료")
         return all_batches
     
-    def process_word_batch(self, batch_info: Dict) -> Dict[int, np.ndarray]:
-        """WORD 배치 처리 (비디오 → 넘파이 배열) 및 crop_images 반환"""
+    def process_batch(self, batch_info: Dict) -> Dict[str, np.ndarray]:
+        """배치 처리 (비디오 → 넘파이 배열) 및 crop_images 반환"""
         batch_id = batch_info['batch_id']
         folder_name = batch_info['folder_name']
         batch_data = batch_info['data']
@@ -538,17 +585,22 @@ class BatchProcessor:
         
         self.logger.info(f"🔄 배치 {batch_id} [{folder_name}] 처리 시작 ({len(batch_data)}개)")
         
-        for word_id, video_path in tqdm(batch_data, desc=f"배치 {batch_id} [{folder_name}]"):
-            success, crop_images = self.processor.process_word_video(word_id, video_path, self.word_output_dir)
+        for item_type, item_id, video_path in tqdm(batch_data, desc=f"배치 {batch_id} [{folder_name}]"):
+            success, crop_images = self.processor.process_video(item_type, item_id, video_path, self.video_output_dir)
             if success:
-                successful_data[word_id] = crop_images
+                key = f"{item_type}{item_id:04d}"
+                successful_data[key] = {
+                    'crop_images': crop_images,
+                    'item_type': item_type,
+                    'item_id': item_id
+                }
         
         self.logger.info(f"✅ 배치 {batch_id} [{folder_name}] 처리 완료: {len(successful_data)}/{len(batch_data)}개 성공")
         return successful_data
 
-    def create_hdf5_batch(self, successful_data: Dict[int, np.ndarray], batch_info: Dict):
+    def create_hdf5_batch(self, successful_data: Dict[str, Dict], batch_info: Dict):
         """
-        WORD 배열들을 프레임과 포즈로 분리된 HDF5 배치 파일로 변환합니다.
+        배열들을 프레임과 포즈로 분리된 HDF5 배치 파일로 변환합니다.
         - 프레임: JPEG 형식으로 압축되어 저장 (가변 길이)
         - HDF5 데이터셋: LZF 압축 적용
         """
@@ -556,13 +608,14 @@ class BatchProcessor:
             batch_id = batch_info['batch_id']
             folder_name = batch_info['folder_name']
             folder_batch_idx = batch_info['folder_batch_idx']
-            word_start, word_end = batch_info['word_range']
+            item_range = batch_info['item_range']
             
             self.logger.info(f"📦 배치 {batch_id} [{folder_name}] HDF5 생성 시작")
             
             # HDF5 파일 경로 (개선된 네이밍 규칙)
-            frames_h5_path = self.hdf5_output_dir / f"batch_WORD_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
-            poses_h5_path = self.hdf5_output_dir / f"batch_WORD_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
+            types_str = "_".join(self.item_types)
+            frames_h5_path = self.hdf5_output_dir / f"batch_{types_str}_{folder_name}_{folder_batch_idx:02d}_{self.direction}_frames.h5"
+            poses_h5_path = self.hdf5_output_dir / f"batch_{types_str}_{folder_name}_{folder_batch_idx:02d}_{self.direction}_poses.h5"
             
             # JPEG 인코딩된 데이터를 위한 가변 길이 타입 정의
             jpeg_vlen_dtype = h5py.vlen_dtype(np.uint8)
@@ -575,30 +628,36 @@ class BatchProcessor:
                 batch_metadata = {
                     'folder_name': folder_name,
                     'folder_batch_idx': folder_batch_idx,
-                    'word_range': [word_start, word_end],
+                    'item_range': item_range,
+                    'item_types': self.item_types,
+                    'direction': self.direction,
                     'video_count': len(successful_data),
                     'creation_time': str(datetime.now())
                 }
                 f_frames.attrs.update(batch_metadata)
                 f_poses.attrs.update(batch_metadata)
                 
-                # 처리 성공한 WORD ID 목록을 정렬하여 순서 보장
-                word_ids = sorted(successful_data.keys())
+                # 처리 성공한 키 목록을 정렬하여 순서 보장
+                keys = sorted(successful_data.keys())
 
-                for word_id in tqdm(word_ids, desc=f"HDF5 배치 {batch_id} [{folder_name}]"):
-                    word_dir = self.word_output_dir / f"WORD{word_id:04d}"
-                    crop_images = successful_data[word_id]
+                for key in tqdm(keys, desc=f"HDF5 배치 {batch_id} [{folder_name}]"):
+                    data = successful_data[key]
+                    item_type = data['item_type']
+                    item_id = data['item_id']
+                    crop_images = data['crop_images']
                     
-                    # 임시 저장된 넘파이 배열 로드
-                    keypoints_scaled = np.load(word_dir / "keypoints_scaled.npy")
-                    scores = np.load(word_dir / "scores.npy")
+                    # 저장된 데이터 로드
+                    item_dir = self.video_output_dir / f"{item_type}{item_id:04d}"
+                    keypoints_scaled = np.load(item_dir / "keypoints_scaled.npy")
+                    scores = np.load(item_dir / "scores.npy")
                     
-                    with open(word_dir / "metadata.json", 'r') as f:
+                    with open(item_dir / "metadata.json", 'r') as f:
                         metadata = json.load(f)
                     
-                    video_group = f"video_{word_id:04d}"
+                    video_group = f"video_{item_type.lower()}{item_id:04d}"
+                    
                     # --- 프레임 파일(f_frames)에 데이터 저장 ---
-                    frame_group = f_frames.create_group(f"video_{word_id:04d}")
+                    frame_group = f_frames.create_group(video_group)
                     
                     # 이미지를 JPEG 바이트 스트림으로 인코딩
                     jpeg_frames = [cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1] for img in crop_images]
@@ -612,8 +671,9 @@ class BatchProcessor:
                     # 메타데이터 저장
                     f_frames.create_dataset(f"{video_group}/metadata", 
                                           data=json.dumps(metadata))
+                    
                     # --- 포즈 파일(f_poses)에 데이터 저장 ---
-                    pose_group = f_poses.create_group(f"video_{word_id:04d}")
+                    pose_group = f_poses.create_group(video_group)
                     
                     # 포즈 관련 데이터셋 생성 (lzf 압축)
                     pose_group.create_dataset("keypoints_scaled", data=keypoints_scaled, compression='lzf')
@@ -626,14 +686,14 @@ class BatchProcessor:
         except Exception as e:
             self.logger.error(f"❌ 배치 {batch_info['batch_id']} [{batch_info['folder_name']}] HDF5 생성 실패: {e}", exc_info=True)
 
-    def cleanup_word_files(self, word_ids: List[int], batch_info: Dict):
-        """WORD 중간 파일들 정리"""
+    def cleanup_video_files(self, keys: List[str], batch_info: Dict):
+        """중간 파일들 정리"""
         batch_id = batch_info['batch_id']
-        for word_id in word_ids:
-            word_dir = self.word_output_dir / f"WORD{word_id:04d}"
-            if word_dir.exists():
-                shutil.rmtree(word_dir)
-        self.logger.info(f"🧹 배치 {batch_id} 중간 파일 {len(word_ids)}개 정리 완료")
+        for key in keys:
+            item_dir = self.video_output_dir / key
+            if item_dir.exists():
+                shutil.rmtree(item_dir)
+        self.logger.info(f"🧹 배치 {batch_id} 중간 파일 {len(keys)}개 정리 완료")
 
     def process_all_batches(self, cleanup_intermediate: bool = False):
         """전체 배치 처리 파이프라인"""
@@ -647,12 +707,12 @@ class BatchProcessor:
         for batch_info in all_batches:
             self.logger.info(f"\n🚀 배치 {batch_info['batch_id'] + 1}/{len(all_batches)} [{batch_info['folder_name']}] 처리 시작")
             
-            successful_data = self.process_word_batch(batch_info)
+            successful_data = self.process_batch(batch_info)
             
             if successful_data:
                 self.create_hdf5_batch(successful_data, batch_info)
                 if cleanup_intermediate:
-                    self.cleanup_word_files(list(successful_data.keys()), batch_info)
+                    self.cleanup_video_files(list(successful_data.keys()), batch_info)
             
             self.logger.info(f"✅ 배치 {batch_info['batch_id'] + 1} [{batch_info['folder_name']}] 완료\n")
         
@@ -668,13 +728,17 @@ class BatchProcessor:
         for batch_info in all_batches:
             folder_name = batch_info['folder_name']
             if folder_name not in folder_stats:
-                folder_stats[folder_name] = {'batches': 0, 'videos': 0}
+                folder_stats[folder_name] = {'batches': 0, 'videos': 0, 'types': set()}
             
             folder_stats[folder_name]['batches'] += 1
             folder_stats[folder_name]['videos'] += len(batch_info['data'])
+            
+            # 타입별 통계
+            for item_type, _, _ in batch_info['data']:
+                folder_stats[folder_name]['types'].add(item_type)
         
         self.logger.info("\n📊 최종 처리 통계:")
-        self.logger.info("=" * 50)
+        self.logger.info("=" * 60)
         
         total_batches = 0
         total_videos = 0
@@ -682,11 +746,12 @@ class BatchProcessor:
         for folder_name, stats in folder_stats.items():
             batches = stats['batches']
             videos = stats['videos']
-            self.logger.info(f"📁 {folder_name}: {batches}개 배치, {videos}개 영상")
+            types = ", ".join(sorted(stats['types']))
+            self.logger.info(f"📁 {folder_name}: {batches}개 배치, {videos}개 영상 ({types})")
             total_batches += batches
             total_videos += videos
         
-        self.logger.info("=" * 50)
+        self.logger.info("=" * 60)
         self.logger.info(f"🎯 전체: {total_batches}개 배치, {total_videos}개 영상")
 
     def process_test_batch(self, folder_name: str = None, test_count: int = 5):
@@ -705,7 +770,10 @@ class BatchProcessor:
         
         video_data = folder_video_data[test_folder][:test_count]
         
-        self.logger.info(f"🧪 테스트 배치 처리 시작 [{test_folder}] ({len(video_data)}개 {self.direction} 방향 영상)")
+        types_in_test = set([item_type for item_type, _, _ in video_data])
+        types_str = ", ".join(sorted(types_in_test))
+        
+        self.logger.info(f"🧪 테스트 배치 처리 시작 [{test_folder}] ({len(video_data)}개 {self.direction} 방향 영상, {types_str})")
         
         # 테스트 배치 정보 생성
         batch_info = {
@@ -713,10 +781,10 @@ class BatchProcessor:
             'folder_name': test_folder,
             'folder_batch_idx': 0,
             'data': video_data,
-            'word_range': (video_data[0][0], video_data[-1][0])
+            'item_range': f"{video_data[0][0]}{video_data[0][1]:04d}~{video_data[-1][0]}{video_data[-1][1]:04d}"
         }
         
-        successful_data = self.process_word_batch(batch_info)
+        successful_data = self.process_batch(batch_info)
         
         if successful_data:
             self.create_hdf5_batch(successful_data, batch_info)
@@ -725,8 +793,26 @@ class BatchProcessor:
 
 def main():
     """메인 실행 함수"""
-    print("🚀 스트림라인 배치 처리기 (WORD 기반)")
-    print("=" * 50)
+    print("🚀 스트림라인 배치 처리기 (WORD + SEN 지원)")
+    print("=" * 60)
+    
+    # 처리할 아이템 타입 선택
+    print("\n처리할 아이템 타입을 선택하세요:")
+    print("1. WORD만 처리")
+    print("2. SEN만 처리")  
+    print("3. WORD + SEN 모두 처리 (기본값)")
+    
+    type_choice = input("타입 선택 (1-3, 기본값: 3): ").strip()
+    
+    type_map = {
+        '1': ['WORD'],
+        '2': ['SEN'],
+        '3': ['WORD', 'SEN'],
+        '': ['WORD', 'SEN']  # 기본값
+    }
+    
+    item_types = type_map.get(type_choice, ['WORD', 'SEN'])
+    print(f"✅ 선택된 타입: {', '.join(item_types)}")
     
     # RTMW 모델 선택
     print("\n사용할 RTMW 모델을 선택하세요:")
@@ -769,7 +855,11 @@ def main():
     # 배치 처리기 초기화 (모델 자동 다운로드 포함)
     print("\n📥 모델 다운로드 및 초기화 중...")
     try:
-        batch_processor = BatchProcessor(rtmw_model_name=rtmw_model_name, direction=direction)
+        batch_processor = BatchProcessor(
+            rtmw_model_name=rtmw_model_name, 
+            direction=direction,
+            item_types=item_types
+        )
         print("✅ 초기화 완료!")
     except Exception as e:
         print(f"❌ 초기화 실패: {e}")
@@ -795,19 +885,36 @@ def main():
         elif choice == '4':
             folder_video_data = batch_processor.collect_videos_by_folder()
             total_videos = sum(len(videos) for videos in folder_video_data.values())
-            print(f"\n📊 총 {total_videos}개 {direction} 방향 영상 발견:")
+            
+            # 타입별 통계
+            type_counts = {}
+            for videos in folder_video_data.values():
+                for item_type, _, _ in videos:
+                    type_counts[item_type] = type_counts.get(item_type, 0) + 1
+            
+            type_stats = ", ".join([f"{t}:{c}개" for t, c in type_counts.items()])
+            print(f"\n📊 총 {total_videos}개 {direction} 방향 영상 발견 ({type_stats}):")
+            
             for folder_name, video_data in list(folder_video_data.items())[:3]:
-                print(f"  📁 {folder_name}: {len(video_data)}개")
-                for i, (word_id, video_path) in enumerate(video_data[:5]):
-                    print(f"    {i+1}. WORD{word_id:04d} - {Path(video_path).name}")
+                folder_type_counts = {}
+                for item_type, _, _ in video_data:
+                    folder_type_counts[item_type] = folder_type_counts.get(item_type, 0) + 1
+                
+                folder_type_stats = ", ".join([f"{t}:{c}" for t, c in folder_type_counts.items()])
+                print(f"  📁 {folder_name}: {len(video_data)}개 ({folder_type_stats})")
+                
+                for i, (item_type, item_id, video_path) in enumerate(video_data[:5]):
+                    print(f"    {i+1}. {item_type}{item_id:04d} - {Path(video_path).name}")
                 if len(video_data) > 5:
                     print(f"    ... 외 {len(video_data) - 5}개")
+            
             if len(folder_video_data) > 3:
                 remaining_folders = len(folder_video_data) - 3
                 remaining_videos = sum(len(videos) for videos in list(folder_video_data.values())[3:])
                 print(f"  ... 외 {remaining_folders}개 폴더 ({remaining_videos}개 영상)")
         elif choice == '5':
             print(f"\n📋 현재 모델 정보:")
+            print(f"  - 처리 타입: {', '.join(item_types)}")
             print(f"  - RTMW 모델: {rtmw_model_name}")
             print(f"  - YOLO 모델: {YOLO_MODEL_CONFIG['filename']}")
             print(f"  - 처리 방향: {direction}")
