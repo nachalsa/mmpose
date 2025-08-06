@@ -80,7 +80,8 @@ class YOLO11LONNXRTMWHybridInferencer:
     def _determine_yolo_device(self, device: str) -> str:
         """YOLO 디바이스 결정"""
         if device == "auto":
-            if torch.cuda.is_available():
+            available_providers = ort.get_available_providers()
+            if "CUDAExecutionProvider" in available_providers:
                 return "cuda"
             else:
                 return "cpu"
