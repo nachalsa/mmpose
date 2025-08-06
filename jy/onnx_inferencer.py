@@ -81,81 +81,94 @@ def download_file_with_progress(url: str, filepath: str, expected_md5: str = Non
             os.remove(filepath)
         return False
 
-def download_and_extract_zip(url: str, target_filepath: str, extracted_name: str):
+def download_and_extract_zip(url: str, target_filepath: str, extracted_name: str = "end2end.onnx"):
     """ZIP 파일 다운로드 및 특정 파일 압축 해제"""
     print(f"📦 ZIP 파일 다운로드 및 압축 해제 중...")
     print(f"   URL: {url}")
     print(f"   대상 파일: {extracted_name}")
+    print(f"   저장 경로: {target_filepath}")
     
     try:
+        # 대상 디렉토리 생성
+        os.makedirs(os.path.dirname(target_filepath), exist_ok=True)
+        
         # 임시 디렉토리 생성
         with tempfile.TemporaryDirectory() as temp_dir:
             zip_path = os.path.join(temp_dir, "model.zip")
             
             # ZIP 파일 다운로드
             def show_progress(block_num, block_size, total_size):
-                downloaded = block_num * block_size
                 if total_size > 0:
+                    downloaded = block_num * block_size
                     percent = min(downloaded * 100.0 / total_size, 100.0)
                     downloaded_mb = downloaded / (1024 * 1024)
                     total_mb = total_size / (1024 * 1024)
-                    print(f"\r   다운로드 진행률: {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='')
+                    print(f"\r   다운로드 진행률: {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='', flush=True)
             
+            print("   🌐 다운로드 시작...")
             urllib.request.urlretrieve(url, zip_path, show_progress)
-            print()  # 새 줄
+            print("\n   ✅ 다운로드 완료")
             
             # ZIP 파일 압축 해제
             print("   📂 압축 해제 중...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 # ZIP 파일 내용 확인
                 file_list = zip_ref.namelist()
-                print(f"   ZIP 파일 내용: {len(file_list)}개 파일")
+                print(f"   📋 ZIP 파일 내용: {len(file_list)}개 파일")
                 
-                # 대상 파일 찾기
+                # 대상 파일 찾기 - 여러 패턴으로 시도
                 target_file_in_zip = None
+                possible_names = [extracted_name, f"*/{extracted_name}", f"**/{extracted_name}"]
+                
                 for file_path in file_list:
-                    if file_path.endswith(extracted_name) or os.path.basename(file_path) == extracted_name:
+                    # 정확한 이름 매치
+                    if os.path.basename(file_path) == extracted_name:
+                        target_file_in_zip = file_path
+                        break
+                    # .onnx 확장자로 끝나는 파일 찾기
+                    elif file_path.endswith('.onnx') and 'end2end' in file_path:
                         target_file_in_zip = file_path
                         break
                 
                 if target_file_in_zip is None:
-                    print(f"   ❌ ZIP 파일에서 '{extracted_name}' 파일을 찾을 수 없습니다.")
+                    print(f"   ❌ ZIP 파일에서 ONNX 모델을 찾을 수 없습니다.")
                     print(f"   📋 사용 가능한 파일들:")
-                    for file_path in file_list[:10]:  # 처음 10개만 출력
+                    for file_path in file_list[:20]:  # 처음 20개만 출력
                         print(f"      - {file_path}")
-                    if len(file_list) > 10:
+                    if len(file_list) > 20:
                         print(f"      ... 총 {len(file_list)}개 파일")
                     return False
                 
                 print(f"   ✅ 대상 파일 발견: {target_file_in_zip}")
                 
-                # 대상 디렉토리 생성
-                os.makedirs(os.path.dirname(target_filepath), exist_ok=True)
-                
                 # 파일 압축 해제
                 with zip_ref.open(target_file_in_zip) as source, open(target_filepath, 'wb') as target:
                     file_size = zip_ref.getinfo(target_file_in_zip).file_size
                     extracted_size = 0
+                    chunk_size = 8192  # 8KB 청크
                     
                     while True:
-                        chunk = source.read(8192)  # 8KB 청크
+                        chunk = source.read(chunk_size)
                         if not chunk:
                             break
                         target.write(chunk)
                         extracted_size += len(chunk)
                         
                         if file_size > 0:
-                            percent = extracted_size * 100.0 / file_size
-                            print(f"\r   압축 해제 진행률: {percent:.1f}%", end='')
+                            percent = min(extracted_size * 100.0 / file_size, 100.0)
+                            print(f"\r   압축 해제 진행률: {percent:.1f}%", end='', flush=True)
                 
-                print()  # 새 줄
-                print(f"✅ 압축 해제 완료: {os.path.basename(target_filepath)}")
+                print("\n   ✅ 압축 해제 완료")
                 
                 # 파일 크기 확인
                 if os.path.exists(target_filepath):
                     file_size_mb = os.path.getsize(target_filepath) / (1024 * 1024)
-                    print(f"   파일 크기: {file_size_mb:.1f} MB")
-                    return True
+                    print(f"   📄 최종 파일 크기: {file_size_mb:.1f} MB")
+                    if file_size_mb > 10:  # 10MB 이상이면 성공으로 간주
+                        return True
+                    else:
+                        print(f"   ⚠️ 파일 크기가 너무 작습니다 ({file_size_mb:.1f}MB < 10MB)")
+                        return False
                 else:
                     print(f"   ❌ 압축 해제된 파일을 찾을 수 없습니다.")
                     return False
@@ -163,14 +176,26 @@ def download_and_extract_zip(url: str, target_filepath: str, extracted_name: str
     except Exception as e:
         print(f"\n❌ ZIP 다운로드/압축 해제 실패: {e}")
         if os.path.exists(target_filepath):
-            os.remove(target_filepath)
+            try:
+                os.remove(target_filepath)
+            except:
+                pass
         return False
 
 def ensure_model_exists(model_path: str, model_name: str = None) -> bool:
-    """모델 파일 존재 확인 및 자동 다운로드"""
+    """모델 파일 존재 확인 및 자동 다운로드 (캐싱 개선)"""
+    # 파일 존재 및 크기 검증
     if os.path.exists(model_path):
-        print(f"✅ 모델 파일 존재: {os.path.basename(model_path)}")
-        return True
+        try:
+            file_size = os.path.getsize(model_path)
+            if file_size > 50 * 1024 * 1024:  # 50MB 이상이어야 유효한 ONNX 모델
+                print(f"✅ 모델 파일 존재: {os.path.basename(model_path)} ({file_size/1024/1024:.1f}MB)")
+                return True
+            else:
+                print(f"⚠️ 불완전한 모델 파일 감지 ({file_size/1024/1024:.1f}MB < 50MB), 재다운로드 필요")
+                os.remove(model_path)  # 불완전한 파일 삭제
+        except OSError as e:
+            print(f"⚠️ 모델 파일 검증 실패: {e}, 재다운로드 시도")
     
     if model_name is None:
         model_name = os.path.basename(model_path)
@@ -180,21 +205,42 @@ def ensure_model_exists(model_path: str, model_name: str = None) -> bool:
         model_info = MODEL_URLS[model_name]
         print(f"🔍 모델 자동 다운로드 시작: {model_name}")
         
+        # 디렉토리 생성
+        model_dir = os.path.dirname(model_path)
+        if model_dir:  # 빈 문자열이 아닌 경우만
+            os.makedirs(model_dir, exist_ok=True)
+        else:
+            # 현재 디렉토리에 모델 저장
+            model_path = os.path.basename(model_path)
+            print(f"⚠️ 모델 경로 수정: {model_path}")
+            
         # 다운로드 타입에 따라 처리
         if model_info.get("type") == "zip":
             # ZIP 파일 다운로드 및 압축 해제
-            return download_and_extract_zip(
+            success = download_and_extract_zip(
                 model_info["url"],
                 model_path,
                 model_info["extracted_name"]
             )
+            # 다운로드 성공 후 파일 크기 재검증
+            if success and os.path.exists(model_path):
+                final_size = os.path.getsize(model_path)
+                print(f"✅ 모델 다운로드 완료 (최종 크기: {final_size/1024/1024:.1f}MB)")
+                return True
+            return False
         else:
             # 직접 파일 다운로드
-            return download_file_with_progress(
+            success = download_file_with_progress(
                 model_info["url"], 
                 model_path, 
                 model_info.get("md5")
             )
+            # 다운로드 성공 후 파일 크기 재검증
+            if success and os.path.exists(model_path):
+                final_size = os.path.getsize(model_path)
+                print(f"✅ 모델 다운로드 완료 (최종 크기: {final_size/1024/1024:.1f}MB)")
+                return True
+            return False
     else:
         print(f"❌ 알 수 없는 모델: {model_name}")
         print(f"   수동으로 다운로드하여 다음 경로에 저장하세요: {model_path}")
@@ -956,7 +1002,7 @@ def main():
                                (10, info_y + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     
                     # 검출된 사람 정보
-                    if results:
+                    if results is not None and len(results) > 0:
                         person_info = f"Persons: {len(results)}"
                         for i, (_, scores, _) in enumerate(results):
                             valid_kpts = np.sum(scores > 0.3)

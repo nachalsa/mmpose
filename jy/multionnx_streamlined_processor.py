@@ -20,6 +20,7 @@ from datetime import datetime
 import re
 import multiprocessing as mp
 import queue # 작업 큐
+import torch  # GPU 감지를 위해 추가
 # import gc # 가비지 컬렉터 임포트
 
 # 설정 및 MMPose 관련 임포트
@@ -448,7 +449,185 @@ class StreamlinedVideoProcessor:
             return False
 
 
-# +++ 신규: ONNX 추론을 위한 워커 함수 +++
+# +++ 신규: 멀티 GPU ONNX 추론을 위한 워커 함수 +++
+def multi_gpu_onnx_inference_worker(
+    gpu_id: int,
+    task_queue: mp.Queue, 
+    result_queue: mp.Queue, 
+    rtmw_model_name: str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx",
+    gpu_batch_size: int = 512,
+    yolo_device: str = "auto",
+    pose_device: str = "auto"
+):
+    """멀티 GPU ONNX 하이브리드 추론을 수행하는 프로세스"""
+    
+    # GPU 설정
+    import torch
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+    torch.cuda.set_device(0)
+    
+    print(f"🚀 GPU {gpu_id} ONNX Worker 시작 (배치: {gpu_batch_size})...")
+    
+    try:
+        # GPU별 독립적인 처리기 초기화
+        processor = StreamlinedVideoProcessor(
+            rtmw_model_name=rtmw_model_name,
+            yolo_device=f'cuda' if yolo_device == 'auto' else yolo_device,
+            pose_device='cuda' if pose_device == 'auto' else pose_device
+        )
+        
+        # GPU 워밍업
+        dummy_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+        for _ in range(3):
+            try:
+                processor.inferencer.process_frame(dummy_frame)
+            except:
+                pass
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        print(f"✅ GPU {gpu_id} 워밍업 완료")
+        
+        batch_jobs = []
+        processed_count = 0
+        
+        while True:
+            try:
+                # 배치 크기만큼 작업 수집 (더 효율적으로)
+                current_batch_size = min(gpu_batch_size // 4, 128)  # 메모리 안정성을 위해 배치 크기 조정
+                
+                for _ in range(current_batch_size):
+                    try:
+                        job = task_queue.get_nowait()
+                        if job is None:  # 종료 신호
+                            # 남은 배치 처리
+                            if batch_jobs:
+                                process_multi_gpu_batch(processor, batch_jobs, result_queue, gpu_id)
+                            print(f"👋 GPU {gpu_id} Worker 종료 (처리: {processed_count}개)")
+                            return
+                        batch_jobs.append(job)
+                    except queue.Empty:
+                        break
+                
+                # 수집된 작업들을 배치로 처리
+                if batch_jobs:
+                    process_multi_gpu_batch(processor, batch_jobs, result_queue, gpu_id)
+                    processed_count += len(batch_jobs)
+                    
+                    # 진행률 출력 (주기적으로)
+                    if processed_count % 100 == 0:
+                        print(f"📊 GPU {gpu_id}: {processed_count}개 처리 완료")
+                    
+                    batch_jobs = []
+                    
+                    # GPU 메모리 정리
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+                if not batch_jobs:  # 더 이상 작업이 없으면 잠시 대기
+                    time.sleep(0.05)
+                    
+            except Exception as e:
+                print(f"💥 GPU {gpu_id} Worker 오류 발생: {e}")
+                # 오류 발생 시 배치 작업들을 None 결과로 처리
+                for job in batch_jobs:
+                    result_queue.put((job[0], job[1], job[2], job[3], None))
+                batch_jobs = []
+                continue
+                
+    except Exception as e:
+        print(f"❌ GPU {gpu_id} Worker 초기화 실패: {e}")
+
+def process_multi_gpu_batch(processor, batch_jobs, result_queue, gpu_id):
+    """멀티 GPU 배치 작업 처리"""
+    start_time = time.time()
+    
+    for job in batch_jobs:
+        try:
+            job_id, item_type, item_id, video_path = job
+            arrays = processor.process_video_to_arrays(video_path)
+            result_queue.put((job_id, item_type, item_id, video_path, arrays))
+        except Exception as e:
+            print(f"💥 GPU {gpu_id} 배치 처리 오류: {e}")
+            result_queue.put((job[0], job[1], job[2], job[3], None))
+    
+    batch_time = time.time() - start_time
+    if len(batch_jobs) > 0:
+        avg_time = batch_time / len(batch_jobs)
+        print(f"⚡ GPU {gpu_id}: {len(batch_jobs)}개 배치 처리 완료 ({avg_time:.3f}s/video)")
+
+
+# +++ 향상된 CPU 후처리를 위한 워커 함수 +++
+def enhanced_cpu_postprocess_worker(
+    result_queue: mp.Queue, 
+    output_dir: Path,
+    keypoint_scale: int
+):
+    """향상된 결과를 받아 파일로 저장하는 CPU 워커"""
+    processed_count = 0
+    
+    while True:
+        try:
+            result = result_queue.get(timeout=10)
+            if result is None:
+                print(f"👋 CPU Worker 종료 (처리: {processed_count}개)")
+                break
+                
+            job_id, item_type, item_id, video_path, arrays = result
+            
+            if arrays is None:
+                continue
+
+            start_time = time.time()
+            item_dir = output_dir / f"{item_type}{item_id:04d}"
+            item_dir.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                # NPZ 파일 저장 (압축 레벨 최적화)
+                jpeg_frames_dict = {f'frame_{i}': frame for i, frame in enumerate(arrays['jpeg_frames'])}
+                np.savez_compressed(item_dir / "crop_images_jpeg.npz", **jpeg_frames_dict)
+
+                # NPY 파일 저장
+                keypoints_scaled = np.round(arrays['keypoints'] * keypoint_scale).astype(np.int32)
+                np.save(item_dir / "keypoints_scaled.npy", keypoints_scaled)
+                np.save(item_dir / "scores.npy", arrays['scores'])
+                
+                # 메타데이터 저장
+                metadata = {
+                    'item_type': item_type,
+                    'item_id': item_id,
+                    'video_path': str(video_path),
+                    'video_filename': Path(video_path).name,
+                    'frame_count': arrays['frame_count'],
+                    'shape_info': {
+                        'frame_count': arrays['frame_count'],
+                        'keypoints_scaled': list(keypoints_scaled.shape),
+                        'scores': list(arrays['scores'].shape)
+                    },
+                    'keypoint_scale': keypoint_scale,
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                with open(item_dir / "metadata.json", 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+                processed_count += 1
+                
+                # 주기적 진행률 출력
+                if processed_count % 50 == 0:
+                    save_time = time.time() - start_time
+                    print(f"💾 CPU Worker: {processed_count}개 저장 완료 ({save_time:.3f}s)")
+
+            except Exception as e:
+                print(f"💥 저장 오류 {item_type}{item_id:04d}: {e}")
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"💥 CPU 후처리 오류: {e}")
+
+
+# +++ 기존 워커 함수들 (호환성 유지) +++
 def onnx_inference_worker(
     task_queue: mp.Queue, 
     result_queue: mp.Queue, 
@@ -457,57 +636,9 @@ def onnx_inference_worker(
     yolo_device: str = "auto",
     pose_device: str = "auto"
 ):
-    """ONNX 하이브리드 추론을 수행하는 프로세스"""
-    print(f"🚀 ONNX Inference Worker 시작 (YOLO: {yolo_device.upper()}, Pose: {pose_device.upper()}, 배치: {gpu_batch_size})...")
-    
-    # 이 프로세스 내에서 자체적으로 처리기 초기화
-    processor = StreamlinedVideoProcessor(
-        rtmw_model_name=rtmw_model_name,
-        yolo_device=yolo_device,
-        pose_device=pose_device
-    )
-    
-    batch_jobs = []
-    
-    while True:
-        try:
-            # 배치 크기만큼 작업 수집
-            for _ in range(gpu_batch_size):
-                try:
-                    job = task_queue.get_nowait()
-                    if job is None:  # 종료 신호
-                        # 남은 배치 처리
-                        if batch_jobs:
-                            process_batch(processor, batch_jobs, result_queue)
-                        return
-                    batch_jobs.append(job)
-                except queue.Empty:
-                    break
-            
-            # 수집된 작업들을 배치로 처리
-            if batch_jobs:
-                process_batch(processor, batch_jobs, result_queue)
-                batch_jobs = []
-            
-            if not batch_jobs:  # 더 이상 작업이 없으면 잠시 대기
-                time.sleep(0.1)
-                
-        except Exception as e:
-            print(f"💥 ONNX Worker 오류 발생: {e}")
-            continue
-            
-    print("👋 ONNX Inference Worker 종료.")
-
-def process_batch(processor, batch_jobs, result_queue):
-    """배치 작업 처리"""
-    for job in batch_jobs:
-        try:
-            job_id, item_type, item_id, video_path = job
-            arrays = processor.process_video_to_arrays(video_path)
-            result_queue.put((job_id, item_type, item_id, video_path, arrays))
-        except Exception as e:
-            print(f"💥 배치 처리 오류: {e}")
-            result_queue.put((job[0], job[1], job[2], job[3], None))
+    """기존 단일 GPU ONNX 하이브리드 추론을 수행하는 프로세스"""
+    # 멀티 GPU 워커를 GPU ID 0으로 호출
+    multi_gpu_onnx_inference_worker(0, task_queue, result_queue, rtmw_model_name, gpu_batch_size, yolo_device, pose_device)
 
 
 
@@ -677,7 +808,7 @@ class BatchProcessor:
 
     # +++ 핵심 로직 변경: process_all_batches +++
     def process_all_batches(self, cleanup_intermediate: bool = False):
-        """전체 배치 처리 파이프라인 (GPU 최적화 병렬 처리)"""
+        """전체 배치 처리 파이프라인 (멀티 GPU 최적화 병렬 처리)"""
         folder_video_data = self.collect_videos_by_folder()
         if not folder_video_data:
             self.logger.error("❌ 처리할 영상이 없습니다")
@@ -691,54 +822,93 @@ class BatchProcessor:
             self.logger.error("❌ 처리할 영상이 없습니다")
             return
 
-        # 1. 프로세스 간 통신을 위한 큐 생성
-        task_queue = mp.Queue()
-        result_queue = mp.Queue()
+        # GPU 개수 자동 감지
+        num_gpus = min(torch.cuda.device_count(), 2)  # 최대 2개 GPU 사용
+        if num_gpus == 0:
+            num_gpus = 1
+            self.logger.warning("⚠️ CUDA GPU를 찾을 수 없습니다. CPU 모드로 실행합니다.")
+
+        self.logger.info(f"🚀 멀티 GPU 처리 시작: {num_gpus}개 GPU, {len(all_videos)}개 비디오")
+        self.logger.info(f"   - GPU 배치 크기: {self.gpu_batch_size}")
+        self.logger.info(f"   - CPU 워커 수: {self.num_cpu_workers}")
+
+        # 1. 프로세스 간 통신을 위한 큐 생성 (용량 증가)
+        task_queue = mp.Queue(maxsize=num_gpus * 10)
+        result_queue = mp.Queue(maxsize=self.num_cpu_workers * 5)
         
-        # 2. 작업 큐에 모든 비디오 추가
+        # 2. 작업 큐에 모든 비디오 추가 (청크 단위로)
+        chunk_size = max(1, len(all_videos) // (num_gpus * 10))  # 더 작은 청크
         for i, (item_type, item_id, video_path) in enumerate(all_videos):
             task_queue.put((i, item_type, item_id, video_path))
         
-        # 3. ONNX 추론 프로세스 생성
-        onnx_worker = mp.Process(target=onnx_inference_worker, args=(
-            task_queue, result_queue, self.rtmw_model_name,
-            self.gpu_batch_size, self.yolo_device, self.pose_device  # 디바이스 설정 전달
-        ))
-        onnx_worker.start()
+        # 3. 멀티 GPU ONNX 추론 프로세스 생성
+        gpu_workers = []
+        for gpu_id in range(num_gpus):
+            worker = mp.Process(target=multi_gpu_onnx_inference_worker, args=(
+                gpu_id, task_queue, result_queue, self.rtmw_model_name,
+                self.gpu_batch_size, self.yolo_device, self.pose_device
+            ))
+            worker.start()
+            gpu_workers.append(worker)
 
-        # CPU 후처리 프로세스 풀
-        postprocess_pool = mp.Pool(self.num_cpu_workers, cpu_postprocess_worker, (
-            result_queue, self.video_output_dir, self.keypoint_scale
-        ))
+        # 4. CPU 후처리 프로세스 풀 (증가된 워커 수)
+        postprocess_workers = []
+        for i in range(self.num_cpu_workers):
+            worker = mp.Process(target=enhanced_cpu_postprocess_worker, args=(
+                result_queue, self.video_output_dir, self.keypoint_scale
+            ))
+            worker.start()
+            postprocess_workers.append(worker)
 
-        # 4. 진행률 표시 및 대기
+        # 5. 진행률 표시 및 대기
         successful_keys_map = {}
-        device_info = f"YOLO:{self.yolo_device.upper()}, Pose:{self.pose_device.upper()}"
-        with tqdm(total=len(all_videos), desc=f"하이브리드 병렬 처리 ({device_info})") as pbar:
-            for _ in range(len(all_videos)):
-                job_id, item_type, item_id, video_path, arrays = result_queue.get()
-                if arrays:
-                    key = f"{item_type}{item_id:04d}"
-                    for batch_info in self.create_batches_by_folder(folder_video_data):
-                        if any(d[0] == item_type and d[1] == item_id for d in batch_info['data']):
-                            if batch_info['batch_id'] not in successful_keys_map:
-                                successful_keys_map[batch_info['batch_id']] = []
-                            successful_keys_map[batch_info['batch_id']].append(key)
-                            break
-                pbar.update(1)
+        device_info = f"{num_gpus}xGPU, {self.num_cpu_workers}xCPU"
+        processed_count = 0
+        
+        with tqdm(total=len(all_videos), desc=f"멀티 GPU 병렬 처리 ({device_info})") as pbar:
+            while processed_count < len(all_videos):
+                try:
+                    job_id, item_type, item_id, video_path, arrays = result_queue.get(timeout=2)
+                    if arrays:
+                        key = f"{item_type}{item_id:04d}"
+                        for batch_info in self.create_batches_by_folder(folder_video_data):
+                            if any(d[0] == item_type and d[1] == item_id for d in batch_info['data']):
+                                if batch_info['batch_id'] not in successful_keys_map:
+                                    successful_keys_map[batch_info['batch_id']] = []
+                                successful_keys_map[batch_info['batch_id']].append(key)
+                                break
+                    processed_count += 1
+                    pbar.update(1)
+                except queue.Empty:
+                    # 타임아웃 시 현재 상태 확인
+                    current_processed = len(list(self.video_output_dir.iterdir()))
+                    if current_processed > processed_count:
+                        diff = current_processed - processed_count
+                        pbar.update(diff)
+                        processed_count = current_processed
+                    continue
 
-        # 5. 모든 워커 종료
-        task_queue.put(None)
+        # 6. 모든 워커 종료
+        for _ in range(num_gpus):
+            task_queue.put(None)
         for _ in range(self.num_cpu_workers):
-             result_queue.put(None)
+            result_queue.put(None)
 
-        gpu_worker.join()
-        postprocess_pool.close()
-        postprocess_pool.join()
+        # GPU 워커들 종료 대기
+        for worker in gpu_workers:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                worker.terminate()
+
+        # CPU 워커들 종료 대기
+        for worker in postprocess_workers:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                worker.terminate()
         
         self.logger.info("✅ 모든 비디오 처리 완료. HDF5 생성을 시작합니다.")
 
-        # 6. HDF5 배치 생성
+        # 7. HDF5 배치 생성
         all_batches = self.create_batches_by_folder(folder_video_data)
         for batch_info in tqdm(all_batches, desc="HDF5 배치 생성"):
             batch_id = batch_info['batch_id']
@@ -960,12 +1130,14 @@ def main():
     direction = direction_map.get(direction_choice, 'F')
     print(f"✅ 선택된 방향: {direction}")
     
-    # CPU 워커 수 자동 조정
+    # CPU 워커 수 자동 조정 (A6000 x2 환경 최적화)
     if yolo_device == 'cpu':
-        default_cpu_workers = min(8, os.cpu_count())  # YOLO CPU 사용시 더 많은 워커
+        default_cpu_workers = min(16, os.cpu_count() // 4)  # CPU 사용시 더 많은 워커
         print(f"💡 YOLO CPU 사용: CPU 워커 수를 {default_cpu_workers}개로 권장")
     else:
-        default_cpu_workers = max(1, os.cpu_count() // 2)
+        # GPU 사용시 CPU 워커 수 대폭 증가 (A6000 x2 환경)
+        default_cpu_workers = min(32, os.cpu_count() // 2)  # 112 코어 환경에서 56개
+        print(f"💡 고성능 환경 감지: CPU 워커 수를 {default_cpu_workers}개로 권장")
     
     cpu_workers_input = input(f"\n사용할 CPU 워커 수를 입력하세요 (기본값: {default_cpu_workers}): ").strip()
     try:
@@ -974,12 +1146,14 @@ def main():
         num_cpu_workers = default_cpu_workers
     print(f"✅ CPU 워커 수: {num_cpu_workers}")
     
-    # GPU 배치 크기 자동 조정
+    # GPU 배치 크기 자동 조정 (A6000 VRAM 48GB 활용)
     if yolo_device == 'cpu':
-        default_gpu_batch = 16  # YOLO CPU 사용시 더 큰 배치
-        print(f"💡 YOLO CPU 사용: GPU 배치 크기를 {default_gpu_batch}로 권장")
+        default_gpu_batch = 64  # YOLO CPU 사용시 더 큰 배치
+        print(f"💡 YOLO CPU + ONNX GPU: 배치 크기를 {default_gpu_batch}로 권장")
     else:
-        default_gpu_batch = 8
+        # A6000 x2 환경에서 VRAM을 적극 활용
+        default_gpu_batch = 256  # 48GB VRAM을 고려한 큰 배치
+        print(f"💡 A6000 환경 감지: GPU 배치 크기를 {default_gpu_batch}로 권장")
         
     gpu_batch_input = input(f"\nGPU 배치 크기를 입력하세요 (기본값: {default_gpu_batch}): ").strip()
     try:
