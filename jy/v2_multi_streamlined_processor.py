@@ -147,6 +147,15 @@ class OptimizedInferencer:
         try:
             from mmpose.apis import MMPoseInferencer
             # MMPose 버전별 호환성 처리
+            # 오류 회피
+            from mmengine.runner.checkpoint import CheckpointLoader
+
+            CheckpointLoader.load_from_local = staticmethod(
+                lambda filename, map_location: torch.load(
+                    filename, map_location=map_location, weights_only=False
+                )
+            )
+
             try:
                 # 최신 버전 (pose2d 파라미터 사용)
                 self.rtmw_inferencer = MMPoseInferencer(
