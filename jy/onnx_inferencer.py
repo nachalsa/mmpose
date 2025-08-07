@@ -549,29 +549,48 @@ class YOLO11LRTMWONNXInferencer:
         bbox = [margin_w, margin_h, w - margin_w, h - margin_h]
         return [bbox]
     
-    def _preprocess_image_for_pose(self, crop_image: np.ndarray) -> np.ndarray:
+    def _preprocess_image_for_pose(self, crop_image: np.ndarray) -> Optional[np.ndarray]:
         """포즈 추정용 이미지 전처리"""
-        # RTMW-L 384x288 크기로 리사이즈
-        resized = cv2.resize(crop_image, self.pose_input_size)  # (288, 384)
+        try:
+            # 입력 이미지 유효성 검사
+            if crop_image is None or crop_image.size == 0:
+                print(f"⚠️ 빈 크롭 이미지가 전달됨")
+                return None
+            
+            h, w = crop_image.shape[:2]
+            if h == 0 or w == 0:
+                print(f"⚠️ 크기가 0인 크롭 이미지: {h}x{w}")
+                return None
+            
+            # RTMW-L 384x288 크기로 리사이즈
+            try:
+                resized = cv2.resize(crop_image, self.pose_input_size)  # (288, 384)
+            except cv2.error as e:
+                print(f"⚠️ 리사이즈 실패: {e}, 이미지 크기: {crop_image.shape}")
+                return None
+            
+            # BGR to RGB
+            rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            
+            # 정규화 (0-1 범위)
+            normalized = rgb_image.astype(np.float32) / 255.0
+            
+            # 표준화 (ImageNet 평균/표준편차)
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            standardized = (normalized - mean) / std
+            
+            # 차원 변경: HWC -> CHW
+            transposed = standardized.transpose(2, 0, 1)
+            
+            # 배치 차원 추가: CHW -> BCHW
+            batched = np.expand_dims(transposed, axis=0).astype(np.float32)
+            
+            return batched
         
-        # BGR to RGB
-        rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        
-        # 정규화 (0-1 범위)
-        normalized = rgb_image.astype(np.float32) / 255.0
-        
-        # 표준화 (ImageNet 평균/표준편차)
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        standardized = (normalized - mean) / std
-        
-        # 차원 변경: HWC -> CHW
-        transposed = standardized.transpose(2, 0, 1)
-        
-        # 배치 차원 추가: CHW -> BCHW
-        batched = np.expand_dims(transposed, axis=0).astype(np.float32)
-        
-        return batched
+        except Exception as e:
+            print(f"⚠️ 이미지 전처리 실패: {e}")
+            return None
     
     def _postprocess_pose_output(self, outputs: List[np.ndarray], 
                                original_crop_shape: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -651,9 +670,34 @@ class YOLO11LRTMWONNXInferencer:
         try:
             # 배치 전처리
             batch_inputs = []
-            for crop_image in crop_images:
-                input_tensor = self._preprocess_image_for_pose(crop_image)
-                batch_inputs.append(input_tensor[0])  # 배치 차원 제거
+            valid_indices = []  # 유효한 이미지 인덱스 추적
+            original_shapes = []  # 원본 이미지 크기 추적
+            
+            for i, crop_image in enumerate(crop_images):
+                # 이미 전처리된 텐서인지 확인
+                if len(crop_image.shape) == 4 and crop_image.shape[1] == 3:
+                    # 이미 전처리된 배치 텐서 (B, C, H, W)
+                    batch_inputs.append(crop_image[0])  # 배치 차원 제거
+                    valid_indices.append(i)
+                    original_shapes.append((384, 288))  # RTMW 입력 크기
+                elif len(crop_image.shape) == 3 and crop_image.shape[0] == 3:
+                    # 이미 전처리된 단일 텐서 (C, H, W)
+                    batch_inputs.append(crop_image)
+                    valid_indices.append(i)
+                    original_shapes.append((384, 288))  # RTMW 입력 크기
+                else:
+                    # 원본 이미지인 경우 전처리 필요
+                    input_tensor = self._preprocess_image_for_pose(crop_image)
+                    if input_tensor is not None:
+                        batch_inputs.append(input_tensor[0])  # 배치 차원 제거
+                        valid_indices.append(i)
+                        original_shapes.append(crop_image.shape[:2])
+                    else:
+                        print(f"⚠️ 배치 처리에서 이미지 {i} 전처리 실패")
+            
+            if not batch_inputs:
+                print(f"⚠️ 유효한 입력 이미지가 없음")
+                return np.array([]), np.array([])
             
             batch_tensor = np.stack(batch_inputs, axis=0)
             
@@ -663,13 +707,20 @@ class YOLO11LRTMWONNXInferencer:
                 {self.input_name: batch_tensor}
             )
             
-            # 각 이미지에 대해 후처리
+            # 각 유효한 이미지에 대해 후처리
+            batch_idx = 0
             for i, crop_image in enumerate(crop_images):
-                # 배치 출력에서 i번째 결과 추출
-                image_outputs = [output[i:i+1] for output in outputs]
-                keypoints, scores = self._postprocess_pose_output(image_outputs, crop_image.shape[:2])
-                batch_keypoints.append(keypoints)
-                batch_scores.append(scores)
+                if i in valid_indices:
+                    # 배치 출력에서 해당 결과 추출
+                    image_outputs = [output[batch_idx:batch_idx+1] for output in outputs]
+                    keypoints, scores = self._postprocess_pose_output(image_outputs, original_shapes[batch_idx])
+                    batch_keypoints.append(keypoints)
+                    batch_scores.append(scores)
+                    batch_idx += 1
+                else:
+                    # 실패한 이미지는 기본값
+                    batch_keypoints.append(np.zeros((133, 2)))
+                    batch_scores.append(np.zeros(133))
             
             return np.array(batch_keypoints), np.array(batch_scores)
         

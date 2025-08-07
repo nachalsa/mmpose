@@ -92,8 +92,8 @@ class StreamlinedVideoProcessor:
     """HDF5용 간소화된 비디오 처리기 (WORD + SEN 지원)"""
     
     def __init__(self, 
-                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-x_8xb320-270e_cocktail14-384x288.py",
-                 rtmw_model_name: str = "rtmw-x"):  # 모델명으로 선택
+                 rtmw_config_path: str = "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py",
+                 rtmw_model_name: str = "rtmw-l"):  # 모델명으로 선택
         
         self.logger = logging.getLogger(__name__)
         self.keypoint_scale = 8  # 키포인트 x,y 좌표 8배 스케일링
@@ -174,14 +174,22 @@ class StreamlinedVideoProcessor:
             self.logger.info("   ultralytics가 자동으로 다운로드할 예정")
             return yolo_config["filename"]
 
-    def _ensure_rtmw_model(self, model_name: str = "rtmw-x") -> str:
+    def _ensure_rtmw_model(self, model_name: str = "rtmw-l") -> str:
         """RTMW 모델 파일 확인 및 다운로드"""
-        # 모델명으로 설정 찾기
+        # 모델명으로 설정 찾기 - rtmw-l은 실제로는 rtmw-dw-x-l 파일명을 가짐
         rtmw_config = None
-        for config in RTMW_MODEL_OPTIONS:
-            if model_name in config["filename"]:
-                rtmw_config = config
-                break
+        if model_name == "rtmw-l" or "dw-x-l" in model_name:
+            # rtmw-l 요청시 rtmw-dw-x-l 모델 사용
+            for config in RTMW_MODEL_OPTIONS:
+                if "dw-x-l" in config["filename"]:
+                    rtmw_config = config
+                    break
+        else:
+            # 다른 모델들은 기존 로직 사용
+            for config in RTMW_MODEL_OPTIONS:
+                if model_name in config["filename"]:
+                    rtmw_config = config
+                    break
         
         if not rtmw_config:
             self.logger.error(f"❌ 알 수 없는 RTMW 모델명: {model_name}")
@@ -862,18 +870,18 @@ def main():
     
     # RTMW 모델 선택
     print("\n사용할 RTMW 모델을 선택하세요:")
-    print("1. RTMW-x (최고 성능, 기본값)")
-    print("2. RTMW-l (균형)")
+    print("1. RTMW-l (최고 성능, 기본값)")
+    print("2. RTMW-x (느리고 성능 비슷)")
     
     model_choice = input("모델 선택 (1-2, 기본값: 1): ").strip()
     
     rtmw_model_map = {
-        '1': 'rtmw-x',
-        '2': 'rtmw-dw-x-l',
-        '': 'rtmw-x'  # 기본값
+        '1': 'rtmw-dw-x-l',
+        '2': 'rtmw-x',
+        '': 'rtmw-dw-x-l'  # 기본값
     }
-    
-    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-x')
+
+    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-dw-x-l')
     print(f"✅ 선택된 모델: {rtmw_model_name}")
     
     # 방향 선택
