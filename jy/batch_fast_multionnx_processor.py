@@ -7,6 +7,7 @@ Phase 3: 고속 파이프라인 구현 🚀 - 비동기 로딩, 스트리밍 처
 """
 
 import os
+import warnings
 import cv2
 import h5py
 import time
@@ -29,6 +30,9 @@ import psutil
 import GPUtil
 import argparse
 import sys
+
+# ONNX Runtime 경고 억제 (선택사항)
+os.environ.setdefault('ORT_LOGGING_LEVEL', '3')  # ERROR 레벨만 표시
 
 from onnx_inferencer import YOLO11LRTMWONNXInferencer as ONNXInferencer
 
@@ -385,14 +389,25 @@ class BatchFastVideoProcessor:
         start_total_time = time.time()
         
         try:
+            # 파일 존재 여부 및 크기 확인
+            if not os.path.exists(video_path):
+                print(f"❌ 비디오 파일이 존재하지 않음: {video_path}")
+                return None
+            
+            file_size = os.path.getsize(video_path)
+            if file_size < 1024:  # 1KB 미만인 경우 손상된 파일로 간주
+                print(f"❌ 비디오 파일이 너무 작음 (손상 가능): {video_path} ({file_size} bytes)")
+                return None
+            
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                print(f"❌ 비디오 열기 실패: {video_path}")
+                print(f"❌ 비디오 열기 실패 (손상된 파일 또는 지원되지 않는 형식): {video_path}")
                 return None
             
             # 전체 프레임 수 계산
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             if total_frames == 0:
+                print(f"❌ 비디오에 프레임이 없음 (moov atom 누락 가능): {video_path}")
                 cap.release()
                 return None
             
@@ -400,7 +415,23 @@ class BatchFastVideoProcessor:
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
+            # 메타데이터 유효성 검증
+            if fps <= 0 or width <= 0 or height <= 0:
+                print(f"❌ 비디오 메타데이터 오류: {video_path} (fps={fps}, size={width}x{height})")
+                cap.release()
+                return None
+            
             print(f"📹 비디오 정보: {total_frames}프레임, {fps:.2f}FPS, {width}x{height}")
+            
+            # 첫 번째 프레임 읽기 테스트 (실제 읽기 가능 여부 확인)
+            ret, test_frame = cap.read()
+            if not ret or test_frame is None:
+                print(f"❌ 첫 번째 프레임 읽기 실패: {video_path}")
+                cap.release()
+                return None
+            
+            # 비디오 시작 위치로 다시 이동
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
             # 메모리 효율적 프레임 로딩
             frames = []
@@ -1357,8 +1388,8 @@ def save_to_hdf5_streamlined_format(result_data: Dict, output_path: str, video_i
 
 # ===== 메인 실행 함수 =====
 
-def find_test_videos(data_root: str = "data/1.Training/videos") -> List[str]:
-    """테스트용 비디오 파일 찾기"""
+def find_all_videos_comprehensive(data_root: str = "data/1.Training/videos") -> List[str]:
+    """전체 비디오 파일 찾기 (모든 하위 폴더 포함)"""
     video_paths = []
     
     # 데이터 루트 경로 설정
@@ -1369,7 +1400,91 @@ def find_test_videos(data_root: str = "data/1.Training/videos") -> List[str]:
         print(f"❌ 비디오 디렉토리를 찾을 수 없습니다: {data_root}")
         return []
     
-    print(f"🔍 비디오 파일 탐색: {data_root}")
+    print(f"🔍 전체 비디오 파일 탐색: {data_root}")
+    
+    # 지원되는 비디오 확장자
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
+    
+    # .mp4 파일 찾기 (모든 하위 폴더)
+    for root, dirs, files in os.walk(data_root):
+        for file in files:
+            file_lower = file.lower()
+            file_ext = Path(file).suffix.lower()
+            
+            # 비디오 파일이고 '_F.mp4' 패턴을 포함하는 경우
+            if file_ext in video_extensions and '_F.mp4' in file:
+                file_path = os.path.join(root, file)
+                video_paths.append(file_path)
+    
+    # 정렬
+    video_paths = sorted(video_paths)
+    
+    print(f"✅ 발견된 전체 비디오: {len(video_paths)}개")
+    
+    # 폴더별 통계
+    folder_stats = {}
+    for video_path in video_paths:
+        # data/1.Training/videos/04 -> 04
+        rel_path = os.path.relpath(video_path, data_root)
+        folder_name = rel_path.split(os.sep)[0] if os.sep in rel_path else 'root'
+        folder_stats[folder_name] = folder_stats.get(folder_name, 0) + 1
+    
+    print(f"📊 폴더별 비디오 수:")
+    for folder, count in sorted(folder_stats.items()):
+        print(f"   - {folder}: {count}개")
+    
+    return video_paths
+
+def find_all_videos(data_root: str = "data/1.Training/videos") -> Dict[str, List[str]]:
+    """모든 비디오 파일을 폴더별로 찾기"""
+    folder_videos = {}
+    
+    # 데이터 루트 경로 설정
+    if not os.path.exists(data_root):
+        data_root = "/workspace01/team03/data/mmpose/jy/data/1.Training/videos"
+    
+    if not os.path.exists(data_root):
+        print(f"❌ 비디오 디렉토리를 찾을 수 없습니다: {data_root}")
+        return {}
+    
+    print(f"🔍 전체 비디오 파일 탐색: {data_root}")
+    
+    # 각 하위 폴더별로 비디오 파일 수집
+    for item in os.listdir(data_root):
+        item_path = os.path.join(data_root, item)
+        if os.path.isdir(item_path):  # 폴더인 경우
+            folder_name = item
+            video_files = []
+            
+            # 해당 폴더 내 모든 비디오 파일 찾기
+            for root, dirs, files in os.walk(item_path):
+                for file in files:
+                    if file.endswith(('.mp4', '.avi', '.mov')) and 'F.mp4' in file:
+                        file_path = os.path.join(root, file)
+                        video_files.append(file_path)
+            
+            if video_files:
+                folder_videos[folder_name] = sorted(video_files)
+                print(f"   📁 {folder_name}: {len(video_files)}개 비디오")
+    
+    total_videos = sum(len(videos) for videos in folder_videos.values())
+    print(f"✅ 총 발견된 비디오: {total_videos}개 ({len(folder_videos)}개 폴더)")
+    
+    return folder_videos
+
+def find_test_videos(data_root: str = "data/1.Training/videos", limit: int = 10) -> List[str]:
+    """테스트용 비디오 파일 찾기 (제한된 개수)"""
+    video_paths = []
+    
+    # 데이터 루트 경로 설정
+    if not os.path.exists(data_root):
+        data_root = "/workspace01/team03/data/mmpose/jy/data/1.Training/videos"
+    
+    if not os.path.exists(data_root):
+        print(f"❌ 비디오 디렉토리를 찾을 수 없습니다: {data_root}")
+        return []
+    
+    print(f"🔍 테스트용 비디오 파일 탐색: {data_root} (최대 {limit}개)")
     
     # .mp4 파일 찾기
     for root, dirs, files in os.walk(data_root):
@@ -1377,14 +1492,21 @@ def find_test_videos(data_root: str = "data/1.Training/videos") -> List[str]:
             if file.endswith(('.mp4', '.avi', '.mov')) and 'F.mp4' in file:
                 file_path = os.path.join(root, file)
                 video_paths.append(file_path)
+                
+                # 제한 개수에 도달하면 중단
+                if len(video_paths) >= limit:
+                    break
+        if len(video_paths) >= limit:
+            break
     
-    # 처리 가능한 개수로 제한 (테스트용)
-    video_paths = sorted(video_paths)[:10]  # 최대 10개로 제한
+    # 정렬하고 제한
+    video_paths = sorted(video_paths)[:limit]
     
-    print(f"✅ 발견된 비디오: {len(video_paths)}개")
+    print(f"✅ 발견된 테스트 비디오: {len(video_paths)}개")
     for i, path in enumerate(video_paths[:5]):  # 처음 5개만 표시
         file_size = os.path.getsize(path) / (1024*1024)  # MB
-        print(f"   {i+1}. {os.path.basename(path)} ({file_size:.1f}MB)")
+        folder_name = os.path.basename(os.path.dirname(path))
+        print(f"   {i+1}. {folder_name}/{os.path.basename(path)} ({file_size:.1f}MB)")
     
     if len(video_paths) > 5:
         print(f"   ... 및 {len(video_paths) - 5}개 추가 파일")
@@ -1478,131 +1600,125 @@ def main():
             return 1
     
     else:
-        # 기본 모드: 250개 배치 처리 최적화
-        print("📦 기본 모드: 250개 배치 최적화 처리")
+        # 기본 모드: 전체 비디오를 폴더별로 자동 처리
+        print("📦 기본 모드: 전체 비디오 폴더별 자동 처리")
         
-        # 설정
-        config = {
-            'rtmw_model_name': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx',
-            'batch_size': 250,  # 기본값을 250으로 설정
-            'keypoint_scale': 8,
-            'jpeg_quality': 90,
-            'max_vram_usage': 0.75
-        }
+        # 기본 데이터 경로
+        default_data_root = "/workspace01/team03/data/mmpose/jy/data/1.Training/videos"
         
-        # 출력 디렉토리 설정
-        output_dir = "/tmp/batch_fast_multionnx_output"
-        
-        # 비디오 찾기 (테스트 모드일 때만 10개로 제한)
         if args and args.test:
             print("🧪 테스트 모드: 10개 비디오만 처리")
-            video_paths = find_test_videos()
-        else:
-            # 기본적으로 모든 비디오 처리 (250개씩 배치)
-            print("🚀 전체 비디오 처리 모드")
-            video_paths = find_test_videos()  # 실제로는 전체 비디오를 찾는 함수로 교체
-        
-        if not video_paths:
-            print("❌ 처리할 비디오 파일이 없습니다.")
-            print("💡 다음 위치에 비디오 파일을 확인하세요:")
-            print("   - data/1.Training/videos")
-            print("   - /workspace01/team03/data/mmpose/jy/data/1.Training/videos")
-            print()
-            print("💡 전체 폴더 처리를 원하시면:")
-            print("   python batch_fast_multionnx_processor.py \\")
-            print("     --input_folder /path/to/videos \\")
-            print("     --output_folder /path/to/output")
-            return 1
-        
-        print(f"\n⚙️ 처리 설정:")
-        print(f"   - 배치 크기: {config['batch_size']} (250개씩 최적화)")
-        print(f"   - RTMW 모델: {config['rtmw_model_name']}")
-        print(f"   - VRAM 사용률: {config['max_vram_usage']*100}%")
-        print(f"   - 출력 디렉토리: {output_dir}")
-        print(f"   - Streamlined 네이밍: batch_폴더명_배치번호_F_frames.h5, batch_폴더명_배치번호_F_poses.h5")
-            print("   python batch_fast_multionnx_processor.py \\")
-            print("     --input_folder /path/to/videos \\")
-            print("     --output_folder /path/to/output")
-            return 1
-        
-        print(f"\n⚙️ 처리 설정:")
-        print(f"   - 배치 크기: {config['batch_size']}")
-        print(f"   - RTMW 모델: {config['rtmw_model_name']}")
-        print(f"   - VRAM 사용률: {config['max_vram_usage']*100}%")
-        print(f"   - 출력 디렉토리: {output_dir}")
-        
-        # GPU 확인
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_count = torch.cuda.device_count()
-                print(f"\n🖥️ GPU 정보:")
-                for i in range(min(gpu_count, 2)):  # 최대 2개 GPU만 표시
-                    gpu_name = torch.cuda.get_device_name(i)
-                    gpu_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                    print(f"   - GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
-            else:
-                print("⚠️ CUDA GPU를 사용할 수 없습니다. CPU 모드로 실행됩니다.")
-        except ImportError:
-            print("⚠️ PyTorch를 찾을 수 없습니다.")
-        
-        print(f"\n🔥 듀얼 GPU 처리 시작...")
-        print(f"   - 총 비디오: {len(video_paths)}개")
-        print(f"   - GPU 0번과 1번이 동시에 처리됩니다")
-        print(f"   - 각 GPU는 독립적으로 작업을 수행합니다")
-        
-        # 진행률 콜백 함수
-        def progress_callback(progress):
-            if hasattr(progress_callback, 'last_progress'):
-                if progress - progress_callback.last_progress >= 0.1:  # 10%씩 업데이트
-                    print(f"📊 전체 진행률: {progress*100:.1f}%")
-                    progress_callback.last_progress = progress
-            else:
-                progress_callback.last_progress = 0.0
-        
-        try:
-            # 듀얼 GPU 비동기 처리 실행
-            start_time = time.time()
+            video_paths = find_test_videos(default_data_root, 10)
             
-            summary = process_videos_dual_gpu_async_batch(
-                video_paths=video_paths,
-                output_dir=output_dir,
-                config=config,
-                progress_callback=progress_callback
-            )
+            if not video_paths:
+                print("❌ 테스트할 비디오 파일이 없습니다.")
+                return 1
             
-            total_time = time.time() - start_time
+            # 테스트 모드 - 단일 출력
+            config = {
+                'rtmw_model_name': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx',
+                'batch_size': 128,  # 테스트용 작은 배치
+                'keypoint_scale': 8,
+                'jpeg_quality': 90,
+                'max_vram_usage': 0.75
+            }
             
-            # 결과 분석
-            print(f"\n🏁 처리 결과 분석")
-            print("=" * 60)
-            print(f"✅ 처리 완료:")
-            print(f"   - 성공: {summary['completed']}개")
-            print(f"   - 실패: {summary['failed']}개")
-            print(f"   - 총 시간: {total_time:.2f}초")
-            print(f"   - 평균 시간: {summary['average_time_per_video']:.2f}초/비디오")
+            output_dir = "/tmp/batch_fast_multionnx_test_output"
             
-            if summary['completed'] > 0:
-                print(f"\n🖥️ GPU 병렬 처리 확인:")
-                gpu_dist = summary['gpu_distribution']
-                for gpu_id, task_count in gpu_dist.items():
-                    print(f"   - GPU {gpu_id}: {task_count}개 작업 처리")
+            print(f"\n⚙️ 테스트 처리 설정:")
+            print(f"   - 배치 크기: {config['batch_size']} (테스트용)")
+            print(f"   - 비디오 수: {len(video_paths)}개")
+            print(f"   - 출력 디렉토리: {output_dir}")
+            
+            # 테스트 처리 실행
+            try:
+                summary = process_videos_dual_gpu_async_batch(
+                    video_paths=video_paths,
+                    output_dir=output_dir,
+                    config=config,
+                    progress_callback=None
+                )
                 
-                # 작업 분배 균형도 계산
-                if len(gpu_dist) > 1:
-                    task_counts = list(gpu_dist.values())
-                    balance = min(task_counts) / max(task_counts) * 100 if max(task_counts) > 0 else 0
-                    print(f"   - 작업 균형도: {balance:.1f}%")
-                    
-                    if balance > 80:
-                        print("   ✅ GPU 작업 분배가 균등합니다")
-                    else:
-                        print("   ⚠️ GPU 작업 분배가 불균등합니다")
+                print(f"\n🎉 테스트 처리 완료!")
+                print(f"   - 성공: {summary['completed']}개")
+                print(f"   - 실패: {summary['failed']}개")
+                
+            except Exception as e:
+                print(f"\n💥 테스트 처리 실패: {e}")
+                return 1
+        
+        else:
+            # 전체 폴더별 자동 처리 모드
+            print("🚀 전체 비디오 폴더별 자동 처리 모드")
             
-            # 저장된 파일 확인
-            if os.path.exists(output_dir):
-                h5_files = [f for f in os.listdir(output_dir) if f.endswith('.h5')]
-                frames_files = [f for f in h5_files if 'frames' in f]
+            # 모든 비디오를 폴더별로 찾기
+            folder_videos = find_all_videos(default_data_root)
+            
+            if not folder_videos:
+                print("❌ 처리할 비디오 파일이 없습니다.")
+                print("💡 다음 위치에 비디오 파일을 확인하세요:")
+                print(f"   - {default_data_root}")
+                return 1
+            
+            # 기본 출력 디렉토리
+            base_output_dir = "/tmp/batch_fast_multionnx_output"
+            os.makedirs(base_output_dir, exist_ok=True)
+            
+            print(f"\n📊 처리할 폴더들:")
+            for folder_name, videos in folder_videos.items():
+                print(f"   - {folder_name}: {len(videos)}개 비디오")
+            
+            # 각 폴더별로 순차 처리
+            total_folders = len(folder_videos)
+            successful_folders = 0
+            
+            for folder_idx, (folder_name, video_paths) in enumerate(folder_videos.items()):
+                print(f"\n� 폴더 처리 시작: {folder_name} ({folder_idx+1}/{total_folders})")
+                print(f"   - 비디오 수: {len(video_paths)}개")
+                
+                # 폴더별 출력 디렉토리
+                folder_output_dir = os.path.join(base_output_dir, folder_name)
+                os.makedirs(folder_output_dir, exist_ok=True)
+                
+                try:
+                    # 폴더별 250개씩 배치 처리
+                    result = process_full_folder_production(
+                        input_folder=os.path.join(default_data_root, folder_name),
+                        output_folder=folder_output_dir,
+                        batch_size=250,
+                        processing_batch_size=128,
+                        max_vram_usage=0.75
+                    )
+                    
+                    if result['status'] == 'completed':
+                        successful_folders += 1
+                        print(f"✅ 폴더 {folder_name} 처리 완료!")
+                        print(f"   - 성공 비디오: {result['successful_videos']}개")
+                        print(f"   - 실패 비디오: {result['failed_videos']}개")
+                    else:
+                        print(f"❌ 폴더 {folder_name} 처리 실패")
+                        
+                except Exception as e:
+                    print(f"💥 폴더 {folder_name} 처리 중 오류: {e}")
+                    traceback.print_exc()
+            
+            # 최종 결과
+            print(f"\n🏁 전체 폴더별 처리 완료")
+            print("=" * 60)
+            print(f"✅ 최종 결과:")
+            print(f"   - 성공 폴더: {successful_folders}/{total_folders}")
+            print(f"   - 실패 폴더: {total_folders - successful_folders}/{total_folders}")
+            
+            if successful_folders == total_folders:
+                print("🎉 모든 폴더가 성공적으로 처리되었습니다!")
+                return 0
+            else:
+                print("⚠️ 일부 폴더 처리가 실패했습니다.")
+                return 1
+    
+    print("=" * 60)
+    print("처리 완료")
+    return 0
                 poses_files = [f for f in h5_files if 'poses' in f]
                 
                 print(f"\n💾 저장된 HDF5 파일:")
@@ -1709,8 +1825,39 @@ def find_all_videos_in_folder(folder_path: str) -> List[str]:
     print(f"✅ 발견된 비디오: {len(video_paths)}개")
     return video_paths
 
+def create_batches_by_folder(video_paths: List[str], batch_size: int = 250, data_root: str = "data/1.Training/videos") -> Dict[str, List[List[str]]]:
+    """비디오를 폴더별로 그룹화하고 배치로 나누기"""
+    
+    # 1. 폴더별로 비디오 그룹화
+    folder_videos = {}
+    
+    for video_path in video_paths:
+        folder_name = extract_folder_name_from_video_path(video_path, data_root)
+        if folder_name not in folder_videos:
+            folder_videos[folder_name] = []
+        folder_videos[folder_name].append(video_path)
+    
+    # 2. 각 폴더별로 배치 생성
+    folder_batches = {}
+    total_batches = 0
+    
+    print(f"📦 폴더별 배치 생성:")
+    for folder_name, videos in folder_videos.items():
+        batches = []
+        for i in range(0, len(videos), batch_size):
+            batch = videos[i:i + batch_size]
+            batches.append(batch)
+        
+        folder_batches[folder_name] = batches
+        total_batches += len(batches)
+        
+        print(f"   - {folder_name}: {len(videos)}개 비디오 -> {len(batches)}개 배치")
+    
+    print(f"📊 총 배치 수: {total_batches}개")
+    return folder_batches
+
 def create_batches(video_paths: List[str], batch_size: int = 250) -> List[List[str]]:
-    """비디오 리스트를 배치로 나누기"""
+    """비디오 리스트를 배치로 나누기 (기존 호환성 유지)"""
     batches = []
     
     for i in range(0, len(video_paths), batch_size):
@@ -1723,27 +1870,67 @@ def create_batches(video_paths: List[str], batch_size: int = 250) -> List[List[s
     
     return batches
 
+def extract_folder_name_from_video_path(video_path: str, data_root: str = "data/1.Training/videos") -> str:
+    """비디오 파일 경로에서 폴더 이름 추출
+    
+    Args:
+        video_path: 비디오 파일 경로 (예: "/path/data/1.Training/videos/04/NIA_SL_WORD0001_REAL11_F.mp4")
+        data_root: 데이터 루트 경로
+    
+    Returns:
+        폴더 이름 (예: "04")
+    """
+    # 절대 경로로 변환
+    abs_video_path = os.path.abspath(video_path)
+    
+    # data_root가 상대 경로인 경우 절대 경로로 변환
+    if not os.path.isabs(data_root):
+        data_root = "/workspace01/team03/data/mmpose/jy/data/1.Training/videos"
+    abs_data_root = os.path.abspath(data_root)
+    
+    try:
+        # 상대 경로 계산
+        rel_path = os.path.relpath(abs_video_path, abs_data_root)
+        
+        # 첫 번째 폴더 이름 추출 (예: "04/subdir/video.mp4" -> "04")
+        folder_name = rel_path.split(os.sep)[0]
+        
+        # 폴더 이름이 현재 디렉토리나 상위 디렉토리인 경우 기본값 반환
+        if folder_name in ['.', '..']:
+            return "UNKNOWN"
+        
+        return folder_name
+    except:
+        # 오류 발생 시 기본값 반환
+        return "UNKNOWN"
+
 def extract_folder_name_from_path(folder_path: str) -> str:
     """폴더 경로에서 폴더 이름 추출
     
     Args:
-        folder_path: 입력 폴더 경로 (예: "/path/to/data/03/videos", "/path/to/word", "/path/to/sen")
+        folder_path: 입력 폴더 경로 (예: "/path/to/data/1.Training/videos/04", "/path/to/word", "/path/to/sen")
     
     Returns:
-        폴더 이름 (예: "03", "WORD", "SEN")
+        폴더 이름 (예: "04", "WORD", "SEN")
     """
     folder_path = folder_path.rstrip('/')
     folder_name = os.path.basename(folder_path)
     
-    # 폴더 이름이 숫자인 경우 (예: "03") 그대로 반환
-    if folder_name.isdigit():
-        return folder_name
+    # data/1.Training/videos/XX 구조에서 XX 폴더 이름 추출
+    if 'videos' in folder_path and folder_name.isdigit():
+        # 숫자 폴더 (예: "04", "05", "06" 등)
+        return folder_name.zfill(2)  # 2자리로 패딩 (예: "4" -> "04")
+    elif 'videos' in folder_path:
+        # videos 폴더 아래의 다른 폴더들
+        return folder_name.upper()
     
     # word 또는 sen과 관련된 경우 대문자로 변환
     if 'word' in folder_name.lower():
         return "WORD"
     elif 'sen' in folder_name.lower():
         return "SEN"
+    elif folder_name.isdigit():
+        return folder_name.zfill(2)  # 숫자는 2자리로 패딩
     else:
         # 기타 경우 폴더 이름을 대문자로 변환
         return folder_name.upper()
@@ -1829,7 +2016,15 @@ def save_batch_to_streamlined_hdf5(batch_results: List[Dict], batch_idx: int, ou
                 except:
                     video_id = f"video_{batch_idx:02d}_{video_idx:03d}"
                 
-                video_group_name = f"video_{video_id.lower()}"
+                # 중복 방지를 위해 고유한 그룹 이름 생성
+                base_group_name = f"video_{video_id.lower()}"
+                video_group_name = base_group_name
+                counter = 1
+                
+                # 이미 존재하는 그룹명인 경우 번호를 붙여서 고유하게 만듦
+                while video_group_name in f_frames:
+                    video_group_name = f"{base_group_name}_{counter:02d}"
+                    counter += 1
                 
                 print(f"   📹 처리 중: {video_filename} -> {video_group_name}")
                 
@@ -1905,8 +2100,218 @@ def save_batch_to_streamlined_hdf5(batch_results: List[Dict], batch_idx: int, ou
         
     except Exception as e:
         print(f"💥 배치 {batch_idx:02d} 저장 실패: {e}")
+        print(f"   오류 위치: {type(e).__name__}")
+        print(f"   배치 결과 수: {len(batch_results)}")
+        
+        # 상세 오류 정보
+        if "name already exists" in str(e):
+            print("   ⚠️ HDF5 그룹 이름 중복 오류 - 비디오 ID 중복 가능성")
+        elif "moov atom" in str(e):
+            print("   ⚠️ 손상된 MP4 파일 감지")
+        
         traceback.print_exc()
         raise
+
+def process_all_videos_by_folder(
+    data_root: str = "data/1.Training/videos",
+    output_folder: str = "/tmp/batch_fast_multionnx_output",
+    batch_size: int = 250,
+    processing_batch_size: int = 128,
+    max_vram_usage: float = 0.75
+) -> Dict:
+    """전체 비디오를 폴더별로 250개씩 배치 처리"""
+    
+    print("🚀 전체 비디오 폴더별 배치 처리 시작")
+    print("=" * 80)
+    print(f"📁 데이터 루트: {data_root}")
+    print(f"📁 출력 폴더: {output_folder}")
+    print(f"📦 배치 크기: {batch_size}개")
+    print(f"⚙️ 처리 배치 크기: {processing_batch_size}")
+    print(f"🖥️ 최대 VRAM 사용률: {max_vram_usage*100}%")
+    
+    start_total_time = time.time()
+    
+    # 출력 폴더 생성
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # 1. 모든 비디오 파일 찾기
+    all_video_paths = find_all_videos_comprehensive(data_root)
+    
+    if not all_video_paths:
+        print("❌ 처리할 비디오 파일이 없습니다.")
+        return {'status': 'failed', 'reason': 'no_videos'}
+    
+    total_videos = len(all_video_paths)
+    print(f"\n📊 발견된 총 비디오: {total_videos}개")
+    
+    # 2. 폴더별로 배치 생성
+    folder_batches = create_batches_by_folder(all_video_paths, batch_size, data_root)
+    
+    # Processing 설정
+    config = {
+        'rtmw_model_name': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx',
+        'batch_size': processing_batch_size,
+        'keypoint_scale': 8,
+        'jpeg_quality': 90,
+        'max_vram_usage': max_vram_usage
+    }
+    
+    # 전체 결과 추적
+    all_batch_results = []
+    total_successful_batches = 0
+    total_failed_batches = 0
+    overall_batch_idx = 0
+    
+    print(f"\n🔥 폴더별 배치 처리 시작...")
+    print("=" * 80)
+    
+    # 각 폴더별로 처리
+    for folder_name, batches in folder_batches.items():
+        print(f"\n📂 폴더 '{folder_name}' 처리 시작 ({len(batches)}개 배치)")
+        
+        folder_successful = 0
+        folder_failed = 0
+        
+        # 폴더별 배치 처리
+        for batch_idx_in_folder, batch_videos in enumerate(batches):
+            batch_start_time = time.time()
+            
+            print(f"\n📦 배치 {folder_name}_{batch_idx_in_folder:02d} 처리 시작")
+            print(f"   - 비디오 수: {len(batch_videos)}개")
+            print(f"   - 전체 진행률: {overall_batch_idx}/{sum(len(batches) for batches in folder_batches.values())}")
+            
+            try:
+                # 임시 출력 디렉토리
+                temp_output_dir = os.path.join(output_folder, f"temp_batch_{folder_name}_{batch_idx_in_folder:02d}")
+                os.makedirs(temp_output_dir, exist_ok=True)
+                
+                # 듀얼 GPU 처리
+                def batch_progress_callback(progress):
+                    total_batches = sum(len(batches) for batches in folder_batches.values())
+                    overall_progress = (overall_batch_idx + progress) / total_batches
+                    print(f"📊 전체 진행률: {overall_progress*100:.1f}% (배치 {folder_name}_{batch_idx_in_folder:02d}: {progress*100:.1f}%)")
+                
+                summary = process_videos_dual_gpu_async_batch(
+                    video_paths=batch_videos,
+                    output_dir=temp_output_dir,
+                    config=config,
+                    progress_callback=batch_progress_callback
+                )
+                
+                batch_processing_time = time.time() - batch_start_time
+                
+                # 개별 처리 결과를 배치 결과로 수집
+                current_batch_results = []
+                for task_id, result_item in summary['results'].items():
+                    if result_item['status'] == 'completed':
+                        current_batch_results.append(result_item)
+                
+                if current_batch_results:
+                    # Streamlined HDF5 배치 저장 (폴더 이름 사용)
+                    save_batch_to_streamlined_hdf5(current_batch_results, batch_idx_in_folder, output_folder, folder_name)
+                    
+                    folder_successful += 1
+                    total_successful_batches += 1
+                    
+                    print(f"✅ 배치 {folder_name}_{batch_idx_in_folder:02d} 완료:")
+                    print(f"   - 성공: {len(current_batch_results)}개")
+                    print(f"   - 실패: {len(batch_videos) - len(current_batch_results)}개")
+                    print(f"   - 처리 시간: {batch_processing_time:.2f}초")
+                else:
+                    print(f"❌ 배치 {folder_name}_{batch_idx_in_folder:02d} 처리 실패: 성공한 비디오가 없음")
+                    folder_failed += 1
+                    total_failed_batches += 1
+                
+                # 임시 디렉토리 정리
+                try:
+                    import shutil
+                    shutil.rmtree(temp_output_dir)
+                except:
+                    pass
+                
+                all_batch_results.append({
+                    'folder_name': folder_name,
+                    'batch_idx': batch_idx_in_folder,
+                    'video_count': len(batch_videos),
+                    'successful_count': len(current_batch_results),
+                    'failed_count': len(batch_videos) - len(current_batch_results),
+                    'processing_time': batch_processing_time,
+                    'summary': summary
+                })
+                
+            except Exception as e:
+                print(f"💥 배치 {folder_name}_{batch_idx_in_folder:02d} 처리 실패: {e}")
+                traceback.print_exc()
+                folder_failed += 1
+                total_failed_batches += 1
+            
+            overall_batch_idx += 1
+            
+            # 메모리 정리
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        print(f"\n📂 폴더 '{folder_name}' 처리 완료:")
+        print(f"   - 성공 배치: {folder_successful}개")
+        print(f"   - 실패 배치: {folder_failed}개")
+    
+    total_time = time.time() - start_total_time
+    
+    # 최종 결과 정리
+    total_successful_videos = sum(r.get('successful_count', 0) for r in all_batch_results)
+    total_failed_videos = sum(r.get('failed_count', 0) for r in all_batch_results)
+    total_batches = len(all_batch_results)
+    
+    print(f"\n🏁 전체 폴더별 처리 완료")
+    print("=" * 80)
+    print(f"✅ 최종 결과:")
+    print(f"   - 총 폴더: {len(folder_batches)}개")
+    print(f"   - 총 배치: {total_batches}개")
+    print(f"   - 성공 배치: {total_successful_batches}개")
+    print(f"   - 실패 배치: {total_failed_batches}개")
+    print(f"   - 총 비디오: {total_videos}개")
+    print(f"   - 성공 비디오: {total_successful_videos}개")
+    print(f"   - 실패 비디오: {total_failed_videos}개")
+    print(f"   - 총 처리 시간: {total_time:.2f}초 ({total_time/3600:.1f}시간)")
+    print(f"   - 평균 처리 시간: {total_time/max(total_videos, 1):.2f}초/비디오")
+    
+    # 생성된 HDF5 파일 확인
+    h5_files = [f for f in os.listdir(output_folder) if f.endswith('.h5')]
+    frames_files = [f for f in h5_files if 'frames' in f]
+    poses_files = [f for f in h5_files if 'poses' in f]
+    
+    print(f"\n💾 생성된 Streamlined HDF5 파일:")
+    print(f"   - 프레임 파일: {len(frames_files)}개")
+    print(f"   - 포즈 파일: {len(poses_files)}개")
+    print(f"   - 네이밍 규칙: batch_폴더명_배치번호_F_frames.h5, batch_폴더명_배치번호_F_poses.h5")
+    
+    # 파일 크기 정보
+    total_size = 0
+    for f in h5_files[:10]:  # 처음 10개만 표시
+        file_path = os.path.join(output_folder, f)
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            total_size += file_size
+            print(f"     📄 {f} ({file_size / (1024*1024):.1f}MB)")
+    
+    if len(h5_files) > 10:
+        print(f"     ... 및 {len(h5_files) - 10}개 추가 파일")
+    
+    print(f"   - 총 파일 크기: {total_size / (1024*1024*1024):.2f}GB")
+    
+    return {
+        'status': 'completed',
+        'total_folders': len(folder_batches),
+        'total_batches': total_batches,
+        'successful_batches': total_successful_batches,
+        'failed_batches': total_failed_batches,
+        'total_videos': total_videos,
+        'successful_videos': total_successful_videos,
+        'failed_videos': total_failed_videos,
+        'total_time': total_time,
+        'average_time_per_video': total_time / max(total_videos, 1),
+        'batch_results': all_batch_results
+    }
 
 def process_full_folder_production(
     input_folder: str,
