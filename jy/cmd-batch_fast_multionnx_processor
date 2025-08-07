@@ -1,0 +1,5 @@
+cd /workspace01/team03/data/mmpose/jy
+python batch_fast_multionnx_processor.py \
+  --input_folder /workspace01/team03/data/mmpose/jy/data/1.Training/videos \
+  --output_folder /workspace01/team03/data/mmpose/jy/sign_language_dataset \
+  --batch_size 250

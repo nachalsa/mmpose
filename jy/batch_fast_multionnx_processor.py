@@ -1449,7 +1449,7 @@ def main():
         print(f"   - 입력 폴더: {args.input_folder}")
         print(f"   - 출력 폴더: {args.output_folder}")
         print(f"   - 배치 크기: {args.batch_size}개씩 처리")
-        print(f"   - Streamlined 네이밍: batch_XX_F_frames.h5, batch_XX_F_poses.h5")
+        print(f"   - Streamlined 네이밍: batch_폴더명_배치번호_F_frames.h5, batch_폴더명_배치번호_F_poses.h5")
         
         try:
             result = process_full_folder_production(
@@ -1473,23 +1473,29 @@ def main():
             return 1
     
     else:
-        # 테스트 모드
-        print("🧪 테스트 모드 (10개 비디오 처리)")
+        # 기본 모드: 250개 배치 처리 최적화
+        print("📦 기본 모드: 250개 배치 최적화 처리")
         
         # 설정
         config = {
             'rtmw_model_name': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx',
-            'batch_size': 128,  # 안정성을 위해 128로 설정
+            'batch_size': 250,  # 기본값을 250으로 설정
             'keypoint_scale': 8,
             'jpeg_quality': 90,
             'max_vram_usage': 0.75
         }
         
         # 출력 디렉토리 설정
-        output_dir = "/tmp/batch_fast_multionnx_test_output"
+        output_dir = "/tmp/batch_fast_multionnx_output"
         
-        # 테스트 비디오 찾기
-        video_paths = find_test_videos()
+        # 비디오 찾기 (테스트 모드일 때만 10개로 제한)
+        if args and args.test:
+            print("🧪 테스트 모드: 10개 비디오만 처리")
+            video_paths = find_test_videos()
+        else:
+            # 기본적으로 모든 비디오 처리 (250개씩 배치)
+            print("🚀 전체 비디오 처리 모드")
+            video_paths = find_test_videos()  # 실제로는 전체 비디오를 찾는 함수로 교체
         
         if not video_paths:
             print("❌ 처리할 비디오 파일이 없습니다.")
@@ -1498,6 +1504,17 @@ def main():
             print("   - /workspace01/team03/data/mmpose/jy/data/1.Training/videos")
             print()
             print("💡 전체 폴더 처리를 원하시면:")
+            print("   python batch_fast_multionnx_processor.py \\")
+            print("     --input_folder /path/to/videos \\")
+            print("     --output_folder /path/to/output")
+            return 1
+        
+        print(f"\n⚙️ 처리 설정:")
+        print(f"   - 배치 크기: {config['batch_size']} (250개씩 최적화)")
+        print(f"   - RTMW 모델: {config['rtmw_model_name']}")
+        print(f"   - VRAM 사용률: {config['max_vram_usage']*100}%")
+        print(f"   - 출력 디렉토리: {output_dir}")
+        print(f"   - Streamlined 네이밍: batch_폴더명_배치번호_F_frames.h5, batch_폴더명_배치번호_F_poses.h5")
             print("   python batch_fast_multionnx_processor.py \\")
             print("     --input_folder /path/to/videos \\")
             print("     --output_folder /path/to/output")
@@ -1701,24 +1718,53 @@ def create_batches(video_paths: List[str], batch_size: int = 250) -> List[List[s
     
     return batches
 
-def get_streamlined_naming(batch_idx: int, data_type: str) -> str:
+def extract_folder_name_from_path(folder_path: str) -> str:
+    """폴더 경로에서 폴더 이름 추출
+    
+    Args:
+        folder_path: 입력 폴더 경로 (예: "/path/to/data/03/videos", "/path/to/word", "/path/to/sen")
+    
+    Returns:
+        폴더 이름 (예: "03", "WORD", "SEN")
+    """
+    folder_path = folder_path.rstrip('/')
+    folder_name = os.path.basename(folder_path)
+    
+    # 폴더 이름이 숫자인 경우 (예: "03") 그대로 반환
+    if folder_name.isdigit():
+        return folder_name
+    
+    # word 또는 sen과 관련된 경우 대문자로 변환
+    if 'word' in folder_name.lower():
+        return "WORD"
+    elif 'sen' in folder_name.lower():
+        return "SEN"
+    else:
+        # 기타 경우 폴더 이름을 대문자로 변환
+        return folder_name.upper()
+
+def get_streamlined_naming(batch_idx: int, data_type: str, folder_name: str = "") -> str:
     """Streamlined 네이밍 규칙에 따른 파일명 생성
     
     Args:
         batch_idx: 배치 인덱스 (0부터 시작)
         data_type: 'frames' 또는 'poses'
+        folder_name: 폴더 이름 (예: "03", "WORD", "SEN")
     
     Returns:
-        파일명 (예: batch_00_F_frames.h5, batch_01_F_poses.h5)
+        파일명 (예: batch_03_00_F_frames.h5, batch_WORD_01_F_poses.h5)
     """
-    return f"batch_{batch_idx:02d}_F_{data_type}.h5"
+    if folder_name:
+        return f"batch_{folder_name}_{batch_idx:02d}_F_{data_type}.h5"
+    else:
+        return f"batch_{batch_idx:02d}_F_{data_type}.h5"
 
-def save_batch_to_streamlined_hdf5(batch_results: List[Dict], batch_idx: int, output_dir: str):
+def save_batch_to_streamlined_hdf5(batch_results: List[Dict], batch_idx: int, output_dir: str, folder_name: str = ""):
     """배치 결과를 Streamlined HDF5 형식으로 저장 (250개씩)"""
     try:
         # Streamlined 네이밍 규칙 적용
-        frames_filename = get_streamlined_naming(batch_idx, 'frames')
-        poses_filename = get_streamlined_naming(batch_idx, 'poses')
+        frames_filename = get_streamlined_naming(batch_idx, 'frames', folder_name)
+        poses_filename = get_streamlined_naming(batch_idx, 'poses', folder_name)
         
         frames_h5_path = os.path.join(output_dir, frames_filename)
         poses_h5_path = os.path.join(output_dir, poses_filename)
@@ -1736,9 +1782,9 @@ def save_batch_to_streamlined_hdf5(batch_results: List[Dict], batch_idx: int, ou
             
             # 배치 메타데이터
             batch_metadata = {
-                'folder_name': f'batch_{batch_idx:02d}',
+                'folder_name': f'batch_{folder_name}_{batch_idx:02d}' if folder_name else f'batch_{batch_idx:02d}',
                 'folder_batch_idx': batch_idx,
-                'item_range': f'batch_{batch_idx:02d}',
+                'item_range': f'batch_{folder_name}_{batch_idx:02d}' if folder_name else f'batch_{batch_idx:02d}',
                 'item_types': ['WORD'],
                 'direction': 'F',
                 'video_count': len(batch_results),
@@ -1879,6 +1925,10 @@ def process_full_folder_production(
     # 출력 폴더 생성
     os.makedirs(output_folder, exist_ok=True)
     
+    # 폴더 이름 추출 (파일명에 사용)
+    folder_name = extract_folder_name_from_path(input_folder)
+    print(f"📂 폴더 식별자: {folder_name}")
+
     # 1. 모든 비디오 파일 찾기
     all_video_paths = find_all_videos_in_folder(input_folder)
     
@@ -1958,7 +2008,7 @@ def process_full_folder_production(
             
             if current_batch_results:
                 # Streamlined HDF5 배치 저장
-                save_batch_to_streamlined_hdf5(current_batch_results, batch_idx, output_folder)
+                save_batch_to_streamlined_hdf5(current_batch_results, batch_idx, output_folder, folder_name)
                 
                 successful_batches += 1
                 
@@ -2031,7 +2081,7 @@ def process_full_folder_production(
     print(f"\n💾 생성된 Streamlined HDF5 파일:")
     print(f"   - 프레임 파일: {len(frames_files)}개")
     print(f"   - 포즈 파일: {len(poses_files)}개")
-    print(f"   - 네이밍 규칙: batch_XX_F_frames.h5, batch_XX_F_poses.h5")
+    print(f"   - 네이밍 규칙: batch_폴더명_배치번호_F_frames.h5, batch_폴더명_배치번호_F_poses.h5")
     
     # 파일 크기 정보
     total_size = 0

@@ -1,0 +1,8 @@
+# 공통
+pip install opencv-python numpy requests flask
+
+# 엣지 서버용
+pip install ultralytics
+
+# 포즈 서버용  
+pip install mmpose torch torchvision

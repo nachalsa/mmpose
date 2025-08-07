@@ -1,0 +1,6 @@
+python pose_server.py \
+    --config "configs/wholebody_2d_keypoint/rtmpose/cocktail14/rtmw-l_8xb320-270e_cocktail14-384x288.py" \
+    --checkpoint "models/rtmw-dw-x-l_simcc-cocktail14_270e-384x288-f840f204_20231122.pth" \
+    --device auto \
+    --port 5000 \
+    --host 0.0.0.0
