@@ -870,18 +870,18 @@ def main():
     
     # RTMW 모델 선택
     print("\n사용할 RTMW 모델을 선택하세요:")
-    print("1. RTMW-x (최고 성능, 기본값)")
-    print("2. RTMW-l (균형)")
+    print("1. RTMW-l (최고 성능, 기본값)")
+    print("2. RTMW-x (느리고 성능 비슷)")
     
     model_choice = input("모델 선택 (1-2, 기본값: 1): ").strip()
     
     rtmw_model_map = {
-        '1': 'rtmw-x',
-        '2': 'rtmw-dw-x-l',
-        '': 'rtmw-x'  # 기본값
+        '1': 'rtmw-dw-x-l',
+        '2': 'rtmw-x',
+        '': 'rtmw-dw-x-l'  # 기본값
     }
-    
-    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-x')
+
+    rtmw_model_name = rtmw_model_map.get(model_choice, 'rtmw-dw-x-l')
     print(f"✅ 선택된 모델: {rtmw_model_name}")
     
     # 방향 선택
