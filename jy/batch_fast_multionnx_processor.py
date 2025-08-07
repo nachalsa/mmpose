@@ -1643,156 +1643,39 @@ def main():
                 print(f"   - 성공: {summary['completed']}개")
                 print(f"   - 실패: {summary['failed']}개")
                 
+                return 0
+                
             except Exception as e:
                 print(f"\n💥 테스트 처리 실패: {e}")
+                traceback.print_exc()
                 return 1
         
         else:
             # 전체 폴더별 자동 처리 모드
             print("🚀 전체 비디오 폴더별 자동 처리 모드")
             
-            # 모든 비디오를 폴더별로 찾기
-            folder_videos = find_all_videos(default_data_root)
-            
-            if not folder_videos:
-                print("❌ 처리할 비디오 파일이 없습니다.")
-                print("💡 다음 위치에 비디오 파일을 확인하세요:")
-                print(f"   - {default_data_root}")
-                return 1
-            
-            # 기본 출력 디렉토리
-            base_output_dir = "/tmp/batch_fast_multionnx_output"
-            os.makedirs(base_output_dir, exist_ok=True)
-            
-            print(f"\n📊 처리할 폴더들:")
-            for folder_name, videos in folder_videos.items():
-                print(f"   - {folder_name}: {len(videos)}개 비디오")
-            
-            # 각 폴더별로 순차 처리
-            total_folders = len(folder_videos)
-            successful_folders = 0
-            
-            for folder_idx, (folder_name, video_paths) in enumerate(folder_videos.items()):
-                print(f"\n� 폴더 처리 시작: {folder_name} ({folder_idx+1}/{total_folders})")
-                print(f"   - 비디오 수: {len(video_paths)}개")
+            # 전체 폴더별 자동 처리 실행
+            try:
+                result = process_all_videos_by_folder(
+                    data_root=default_data_root,
+                    output_folder="/tmp/batch_fast_multionnx_output",
+                    batch_size=250,
+                    processing_batch_size=128,
+                    max_vram_usage=0.75
+                )
                 
-                # 폴더별 출력 디렉토리
-                folder_output_dir = os.path.join(base_output_dir, folder_name)
-                os.makedirs(folder_output_dir, exist_ok=True)
-                
-                try:
-                    # 폴더별 250개씩 배치 처리
-                    result = process_full_folder_production(
-                        input_folder=os.path.join(default_data_root, folder_name),
-                        output_folder=folder_output_dir,
-                        batch_size=250,
-                        processing_batch_size=128,
-                        max_vram_usage=0.75
-                    )
+                if result['status'] == 'completed':
+                    print("🎉 전체 폴더별 자동 처리 성공!")
+                    return 0
+                else:
+                    print("⚠️ 일부 폴더 처리가 실패했습니다.")
+                    return 1
                     
-                    if result['status'] == 'completed':
-                        successful_folders += 1
-                        print(f"✅ 폴더 {folder_name} 처리 완료!")
-                        print(f"   - 성공 비디오: {result['successful_videos']}개")
-                        print(f"   - 실패 비디오: {result['failed_videos']}개")
-                    else:
-                        print(f"❌ 폴더 {folder_name} 처리 실패")
-                        
-                except Exception as e:
-                    print(f"💥 폴더 {folder_name} 처리 중 오류: {e}")
-                    traceback.print_exc()
-            
-            # 최종 결과
-            print(f"\n🏁 전체 폴더별 처리 완료")
-            print("=" * 60)
-            print(f"✅ 최종 결과:")
-            print(f"   - 성공 폴더: {successful_folders}/{total_folders}")
-            print(f"   - 실패 폴더: {total_folders - successful_folders}/{total_folders}")
-            
-            if successful_folders == total_folders:
-                print("🎉 모든 폴더가 성공적으로 처리되었습니다!")
-                return 0
-            else:
-                print("⚠️ 일부 폴더 처리가 실패했습니다.")
+            except Exception as e:
+                print(f"💥 전체 폴더별 처리 중 오류: {e}")
+                traceback.print_exc()
                 return 1
     
-    print("=" * 60)
-    print("처리 완료")
-    return 0
-                poses_files = [f for f in h5_files if 'poses' in f]
-                
-                print(f"\n💾 저장된 HDF5 파일:")
-                print(f"   - 프레임 파일: {len(frames_files)}개")
-                print(f"   - 포즈 파일: {len(poses_files)}개")
-                
-                # 파일 크기 정보 (처음 3개만)
-                for f in frames_files[:3]:
-                    file_path = os.path.join(output_dir, f)
-                    file_size = os.path.getsize(file_path) / (1024*1024)  # MB
-                    print(f"     📄 {f} ({file_size:.1f}MB)")
-            
-            # 성능 지표 계산
-            if summary['completed'] > 0:
-                total_videos = summary['completed']
-                avg_fps = 0
-                
-                for result_data in summary['results'].values():
-                    if result_data.get('status') == 'completed' and result_data.get('result'):
-                        fps = result_data['result'].get('fps', 0)
-                        avg_fps += fps
-                
-                if total_videos > 0:
-                    avg_fps /= total_videos
-                    print(f"\n⚡ 성능 지표:")
-                    print(f"   - 평균 FPS: {avg_fps:.1f}")
-                    print(f"   - 총 처리 시간: {total_time:.2f}초")
-                    
-                    if avg_fps > 10:
-                        print("   ✅ 우수한 처리 성능")
-                    elif avg_fps > 5:
-                        print("   ✅ 양호한 처리 성능")
-                    else:
-                        print("   ⚠️ 성능 최적화 필요")
-            
-            # GPU 병렬 처리 검증
-            gpu_used = len([gpu_id for gpu_id, count in summary['gpu_distribution'].items() if count > 0])
-            print(f"\n🔍 GPU 병렬 처리 검증:")
-            if gpu_used > 1:
-                print(f"   ✅ {gpu_used}개 GPU가 모두 작업을 처리했습니다")
-                print("   ✅ 듀얼 GPU 병렬 처리가 성공적으로 작동합니다")
-            else:
-                print("   ⚠️ 단일 GPU만 사용되었습니다")
-            
-            # Streamlined HDF5 형식 검증
-            if frames_files and poses_files:
-                print(f"\n📋 Streamlined HDF5 형식 검증:")
-                print("   ✅ 프레임과 포즈 파일이 분리되어 저장되었습니다")
-                print("   ✅ Streamlined 호환 형식으로 저장 완료")
-            
-            print(f"\n🎉 테스트 처리 성공!")
-            print(f"   - 모든 비디오 처리 완료")
-            print(f"   - GPU 병렬 처리 확인")  
-            print(f"   - Streamlined HDF5 저장 완료")
-            
-            # 전체 폴더 처리 안내
-            print(f"\n💡 전체 폴더 처리를 원하시면:")
-            print(f"   python {sys.argv[0]} \\")
-            print(f"     --input_folder /path/to/videos \\") 
-            print(f"     --output_folder /path/to/output \\")
-            print(f"     --batch_size 250")
-            
-        except KeyboardInterrupt:
-            print("\n\n⏹️  사용자에 의해 중단되었습니다")
-            return 1
-        except Exception as e:
-            print(f"\n💥 처리 중 오류 발생: {e}")
-            traceback.print_exc()
-            return 1
-    
-    print("=" * 60)
-    print("처리 완료")
-    return 0
-
 
 # ===== Production 전체 폴더 처리 함수들 =====
 
