@@ -2,7 +2,7 @@
 """
 개선된 배치 Fast Multi-ONNX 처리기 - GPU 병렬처리 + 프레임 배치 로드
 WORD/SEN 네이밍 규칙 + 패딩 크롭 + 133개 키포인트 (얼굴+손 포함)
-GPU 병렬처리와 180 프레임 배치로 미리 로드 기능 추가
+GPU 병렬처리와 300 프레임 배치로 미리 로드 기능 추가
 """
 
 import os
@@ -149,26 +149,27 @@ def crop_person_image_rtmw(image: np.ndarray, bbox: List[float]) -> Optional[np.
 
 # ===== 아이템 정보 추출 함수 =====
 
-def extract_item_info_from_path(video_path: str) -> Optional[Tuple[str, int]]:
+def extract_item_info_from_path(video_path: str) -> Optional[Tuple[str, int, int]]:
     """
-    비디오 파일명에서 아이템 정보 추출 (WORD 또는 SEN)
+    비디오 파일명에서 아이템 정보 추출 (WORD 또는 SEN + REAL 번호)
     
     Args:
         video_path: 비디오 파일 경로 (예: NIA_SL_WORD0002_REAL05_F.mp4)
         
     Returns:
-        Optional[Tuple[str, int]]: (item_type, item_id) 또는 None
-        예: ("WORD", 2), ("SEN", 1234)
+        Optional[Tuple[str, int, int]]: (item_type, item_id, real_id) 또는 None
+        예: ("WORD", 2, 5), ("SEN", 1234, 9)
     """
     filename = Path(video_path).stem
     
     # 패턴 매칭: NIA_SL_WORD0002_REAL05_F 또는 NIA_SL_SEN1234_REAL09_F
     for item_type in ['WORD', 'SEN']:
-        pattern = rf'_{item_type}(\d{{4}})_'
+        pattern = rf'_{item_type}(\d{{1,4}})_REAL(\d{{2}})_'
         match = re.search(pattern, filename)
         if match:
             item_id = int(match.group(1))
-            return item_type, item_id
+            real_id = int(match.group(2))
+            return item_type, item_id, real_id
     
     return None
 
@@ -202,19 +203,20 @@ def calculate_batch_info(item_type: str, item_id: int) -> Tuple[int, int]:
     
     return batch_number, batch_index
 
-def get_batch_filename(item_type: str, batch_number: int, data_type: str) -> str:
+def get_batch_filename(item_type: str, batch_number: int, real_id: int, data_type: str) -> str:
     """
-    배치 파일명 생성
+    배치 파일명 생성 (사람별 분리)
     
     Args:
         item_type: "WORD" 또는 "SEN"
         batch_number: 배치 번호 (0~11 for WORD, 0~7 for SEN)
+        real_id: REAL 번호 (04~16)
         data_type: "frames" 또는 "poses"
     
     Returns:
-        str: 파일명 (예: batch_WORD_00_F_frames.h5)
+        str: 파일명 (예: batch_WORD_03_11_F_frames.h5)
     """
-    return f"batch_{item_type}_{batch_number:02d}_F_{data_type}.h5"
+    return f"batch_{item_type}_{real_id:02d}_{batch_number:02d}_F_{data_type}.h5"
 
 # ===== 개선된 배치 처리기 클래스들 =====
 
@@ -262,8 +264,8 @@ class FrameBatch:
     metadata: Dict
     
 class VideoFrameLoader:
-    """비디오 프레임 배치 로더 (180 프레임 배치) - 최적화"""
-    def __init__(self, batch_size: int = 180):
+    """비디오 프레임 배치 로더 (300 프레임 배치) - 최적화"""
+    def __init__(self, batch_size: int = 300):
         self.batch_size = batch_size
         
     def load_video_frames(self, video_path: str, max_frames: int = None) -> List[np.ndarray]:
@@ -302,7 +304,7 @@ class VideoFrameLoader:
         return frames
     
     def create_frame_batches(self, frames: List[np.ndarray]) -> List[FrameBatch]:
-        """프레임을 180개씩 배치로 분할 - 200프레임 이하 최적화"""
+        """프레임을 300 배치로 분할 - 200프레임 이하 최적화"""
         batches = []
         total_frames = len(frames)
         
@@ -485,7 +487,7 @@ class ImprovedBatchVideoProcessor:
                  rtmw_model_name: str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx",
                  gpu_ids: List[int] = [0, 1],
                  batch_size: int = 256,
-                 frame_batch_size: int = 180,
+                 frame_batch_size: int = 300,
                  keypoint_scale: int = 8,
                  jpeg_quality: int = 90,
                  max_vram_usage: float = 0.85,
@@ -589,8 +591,8 @@ class ImprovedBatchVideoProcessor:
                 print(f"❌ 아이템 정보 추출 실패: {video_path}")
                 return None
             
-            item_type, item_id = item_info
-            print(f"📋 GPU 병렬 처리 중: {item_type}{item_id:04d} - {Path(video_path).name}")
+            item_type, item_id, real_id = item_info
+            print(f"📋 GPU 병렬 처리 중: {item_type}{item_id:04d}_REAL{real_id:02d} - {Path(video_path).name}")
             
             # 1. 프레임 배치 로드 (전체 프레임을 메모리에 로드)
             print(f"📥 프레임 로드 시작 (200프레임 이하 최적화)...")
@@ -694,6 +696,7 @@ class ImprovedBatchVideoProcessor:
             result = {
                 'item_type': item_type,
                 'item_id': item_id,
+                'real_id': real_id,
                 'batch_number': batch_number,
                 'batch_index': batch_index,
                 'total_frames': actual_frame_count,
@@ -736,23 +739,26 @@ def save_to_rtmw_hdf5_format(result_data: Dict, output_path: str):
     try:
         item_type = result_data['item_type']
         item_id = result_data['item_id']
+        real_id = result_data['real_id']
         batch_number = result_data['batch_number']
         
-        output_path_obj = Path(output_path)
+        # 출력 경로를 절대 경로로 변환
+        output_path_obj = Path(output_path).resolve()
         
-        # 프레임과 포즈 파일 분리
-        frames_filename = get_batch_filename(item_type, batch_number, 'frames')
-        poses_filename = get_batch_filename(item_type, batch_number, 'poses')
+        # 프레임과 포즈 파일 분리 (사람별)
+        frames_filename = get_batch_filename(item_type, batch_number, real_id, 'frames')
+        poses_filename = get_batch_filename(item_type, batch_number, real_id, 'poses')
         
-        frames_h5_path = output_path_obj.parent / frames_filename
-        poses_h5_path = output_path_obj.parent / poses_filename
+        frames_h5_path = output_path_obj / frames_filename
+        poses_h5_path = output_path_obj / poses_filename
         
         # JPEG 가변 길이 타입
         jpeg_vlen_dtype = h5py.vlen_dtype(np.uint8)
         
-        print(f"💾 RTMW HDF5 저장: {item_type}{item_id:04d} -> 배치 {batch_number:02d}")
-        
-        # 두 파일을 동시에 열어서 데이터 추가
+        print(f"💾 RTMW HDF5 저장: {item_type}{item_id:04d}_REAL{real_id:02d} -> 배치 {batch_number:02d}")
+        print(f"   📁 저장 경로: {output_path_obj}")
+        print(f"   📄 프레임 파일: {frames_filename}")
+        print(f"   📄 포즈 파일: {poses_filename}")
         with h5py.File(frames_h5_path, 'a') as f_frames, \
              h5py.File(poses_h5_path, 'a') as f_poses:
             
@@ -761,7 +767,8 @@ def save_to_rtmw_hdf5_format(result_data: Dict, output_path: str):
                 batch_metadata = {
                     'batch_type': item_type,
                     'batch_number': batch_number,
-                    'item_range': f"{item_type}_{batch_number*250+1:04d}~{item_type}_{min((batch_number+1)*250, 3000 if item_type=='WORD' else 2000):04d}",
+                    'real_id': real_id,
+                    'item_range': f"{item_type}_{batch_number*250+1:04d}~{item_type}_{min((batch_number+1)*250, 3000 if item_type=='WORD' else 2000):04d}_REAL{real_id:02d}",
                     'direction': 'F',
                     'crop_method': 'RTMW',
                     'crop_size': '288x384',
@@ -772,8 +779,8 @@ def save_to_rtmw_hdf5_format(result_data: Dict, output_path: str):
                 f_frames.attrs.update(batch_metadata)
                 f_poses.attrs.update(batch_metadata)
             
-            # 비디오 그룹 이름
-            video_group_name = f"video_{item_type.lower()}{item_id:04d}"
+            # 비디오 그룹 이름 (사람별 분리)
+            video_group_name = f"video_{item_type.lower()}{item_id:04d}_real{real_id:02d}"
             
             # === 프레임 파일 저장 ===
             if video_group_name not in f_frames:
@@ -788,6 +795,7 @@ def save_to_rtmw_hdf5_format(result_data: Dict, output_path: str):
                 metadata = {
                     'item_type': item_type,
                     'item_id': item_id,
+                    'real_id': real_id,
                     'batch_number': batch_number,
                     'batch_index': result_data['batch_index'],
                     'frame_count': result_data['total_frames'],
@@ -981,19 +989,19 @@ def find_all_videos_for_processing(data_root: str = None) -> List[str]:
                 # 아이템 정보 확인
                 item_info = extract_item_info_from_path(video_path)
                 if item_info:
-                    item_type, item_id = item_info
+                    item_type, item_id, real_id = item_info
                     all_videos.append(video_path)
                     video_stats[item_type] += 1
                 else:
                     video_stats['OTHER'] += 1
     
-    # 정렬 (WORD 먼저, 그 다음 SEN, 각각 ID 순)
+    # 정렬 (WORD 먼저, 그 다음 SEN, 각각 ID 순, 그리고 REAL 순)
     def sort_key(video_path):
         item_info = extract_item_info_from_path(video_path)
         if item_info:
-            item_type, item_id = item_info
-            return (item_type, item_id)
-        return ('ZZZ', 9999)  # 알 수 없는 파일은 마지막에
+            item_type, item_id, real_id = item_info
+            return (item_type, item_id, real_id)
+        return ('ZZZ', 9999, 99)  # 알 수 없는 파일은 마지막에
     
     all_videos.sort(key=sort_key)
     
@@ -1018,14 +1026,14 @@ def process_all_videos_production(all_videos: List[str], output_dir: str, config
     print(f"🖥️ 최대 VRAM: {config['max_vram_usage']*100}%")
     print(f"📊 예상 배치 수:")
     
-    # 배치 예상 계산
+    # 배치 예상 계산 (사람별 분리)
     batch_estimates = {}
     for video_path in all_videos:
         item_info = extract_item_info_from_path(video_path)
         if item_info:
-            item_type, item_id = item_info
+            item_type, item_id, real_id = item_info
             batch_number, _ = calculate_batch_info(item_type, item_id)
-            batch_key = f"{item_type}_{batch_number:02d}"
+            batch_key = f"{item_type}_{real_id:02d}_{batch_number:02d}"
             batch_estimates[batch_key] = batch_estimates.get(batch_key, 0) + 1
     
     for batch_key, count in sorted(batch_estimates.items()):
@@ -1117,7 +1125,7 @@ def main():
         'rtmw_model_name': 'rtmw-dw-x-l_simcc-cocktail14_270e-384x288.onnx',
         'gpu_ids': [0, 1],  # GPU 병렬처리
         'batch_size': 128,
-        'frame_batch_size': 180,  # 프레임 배치 크기
+        'frame_batch_size': 300,  # 프레임 배치 크기
         'keypoint_scale': 8,
         'jpeg_quality': 90,
         'max_vram_usage': 0.75
@@ -1151,9 +1159,10 @@ def main():
     
     config['gpu_ids'] = available_gpus
     
-    # 출력 디렉토리 설정
-    output_dir = "data/prepro"
+    # 출력 디렉토리 설정 - 절대 경로 사용
+    output_dir = os.path.abspath("data/prepro")
     print(f"📁 출력 디렉토리: {output_dir}")
+    print(f"📁 실제 경로: {os.path.realpath(output_dir)}")
     
     # 전체 비디오 찾기
     all_videos = find_all_videos_for_processing()
@@ -1166,9 +1175,9 @@ def main():
     for i, video_path in enumerate(all_videos[:10]):
         item_info = extract_item_info_from_path(video_path)
         if item_info:
-            item_type, item_id = item_info
+            item_type, item_id, real_id = item_info
             batch_number, batch_index = calculate_batch_info(item_type, item_id)
-            print(f"   {i+1:2d}. {item_type}{item_id:04d} → 배치 {batch_number:02d} (인덱스 {batch_index})")
+            print(f"   {i+1:2d}. {item_type}{item_id:04d}_REAL{real_id:02d} → 배치 {batch_number:02d} (인덱스 {batch_index})")
     
     if len(all_videos) > 10:
         print(f"   ... 및 {len(all_videos) - 10}개 추가 비디오")
