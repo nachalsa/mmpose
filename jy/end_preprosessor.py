@@ -832,7 +832,7 @@ def process_all_videos_production(all_videos: List[str], output_dir: str, config
             video_paths=all_videos,
             output_dir=output_dir,
             config=config,
-            progress_callback=lambda p: print(f"📊 전체 진행률: {p*100:.1f}%") if int(p*100) % 10 == 0 else None
+            progress_callback=None  # 내장된 ProgressDisplay 사용
         )
         
         total_time = time.time() - start_time
