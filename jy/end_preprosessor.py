@@ -591,7 +591,7 @@ class ImprovedBatchVideoProcessor:
                 print(f"❌ 아이템 정보 추출 실패: {video_path}")
                 return None
             
-            item_type, item_id, real_id = item_info
+            item_type, real_id, item_id = item_info
             print(f"📋 GPU 병렬 처리 중: {item_type}{item_id:04d}_REAL{real_id:02d} - {Path(video_path).name}")
             
             # 1. 프레임 배치 로드 (전체 프레임을 메모리에 로드)
